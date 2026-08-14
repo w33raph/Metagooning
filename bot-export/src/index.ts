@@ -210,7 +210,8 @@ async function recordMessageAndCheckSpam(message: Message) {
       if (ch && ch.messages && typeof ch.messages.fetch === "function") {
         const fetched = await ch.messages.fetch({ limit: 100 }).catch(() => null);
         if (fetched) {
-          const userMsgs = Array.from(fetched.values()).filter((m: Message) => m.author.id === userId).slice(0, SPAM_THRESHOLD);
+          const messagesArr: Message[] = Array.from(fetched.values() as IterableIterator<Message>);
+          const userMsgs: Message[] = messagesArr.filter((m: Message) => m.author.id === userId).slice(0, SPAM_THRESHOLD);
           if (userMsgs.length) {
             try {
               // bulkDelete only supports <14 days
