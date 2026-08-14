@@ -385,7 +385,7 @@ function buildRequestButton() {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId("request-role")
-      .setLabel("⚔️  — Request a Role —  ⚔️")
+      .setLabel("🔍—Request Roles—🔎")
       .setStyle(ButtonStyle.Primary),
   );
 }
@@ -777,8 +777,8 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
           await interaction.reply({ content: "Could not update the member's roles.", ephemeral: true }); return;
         }
         const nick = request.inGameId
-          ? `SM |👻 ${request.nickname} | ${request.inGameId}`
-          : `SM |👻 ${request.nickname}`;
+          ? `OG |🚀 ${request.nickname} | ${request.inGameId}`
+          : `OG |🚀 ${request.nickname}`;
         await targetMember.setNickname(nick).catch(() => {});
         await targetMember.send(`Your role request for ${request.roleNames.join(", ")} was approved. Nickname: ${nick}`).catch(() => {});
         pendingRequests.delete(requestId);
@@ -1061,7 +1061,7 @@ client.on("messageCreate", async (message): Promise<void> => {
         new EmbedBuilder()
           .setColor("#8a8b8b")
           .setAuthor({ name: message.guild.name, iconURL: message.guild.iconURL() ?? undefined })
-          .setTitle("👻  Role Request")
+          .setTitle("🚀  Role Request")
           .setDescription("\u200b\nThe Bot will automatically Update your name To the correct format when approved.\n\u200b")
           .addFields({ name: "📋  How it works", value: "1. Click the button below\n2. Enter your name and ID\n3. Select one or more roles from the dropdown\n4. Wait for approval" })
           .setThumbnail(message.guild.iconURL())
