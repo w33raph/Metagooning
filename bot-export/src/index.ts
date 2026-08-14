@@ -31,9 +31,9 @@ const log = {
 
 const PREFIX       = process.env["COMMAND_PREFIX"]        || "!";
 const MOD_ROLE_NAME = process.env["MODERATOR_ROLE_NAME"]  || "moderator";
-const MOD_ROLE_ID   = process.env["MODERATOR_ROLE_ID"]    || "1461842547990200585";
-const APPROVAL_CH   = process.env["ROLE_APPROVAL_CHANNEL_ID"] || "1523555738004226220";
-const WELCOME_CH    = process.env["WELCOME_CHANNEL_ID"]   || "1522792076180324434";
+const MOD_ROLE_ID   = process.env["MODERATOR_ROLE_ID"]    || "1537779341570740271";
+const APPROVAL_CH   = process.env["ROLE_APPROVAL_CHANNEL_ID"] || "1537779343927803946";
+const WELCOME_CH    = process.env["WELCOME_CHANNEL_ID"]   || "1537779342296490038";
 const TOKEN         = process.env["DISCORD_TOKEN"];
 const AUTO_GRANT_INVITE_CODE = process.env["AUTO_GRANT_INVITE_CODE"] || "kngscreenshare";
 const AUTO_GRANT_ROLE_ID = process.env["AUTO_GRANT_ROLE_ID"] || "1527304379990937600";
@@ -44,10 +44,10 @@ if (!TOKEN) {
 }
 
 const REQUESTABLE_ROLE_IDS = [
-  "1522793232755331192", // SS
-  "1522793061141184512", // Generic
-  "1528702196902789191", // AntiBypass
-  "1522793156557541466", // DMA
+  "1537779341121953799", // SS
+  "1537779341121953800", // Generic
+  "1537779341570740264", // AntiBypass
+  "1537779341121953801", // DMA
 ];
 
 const BAN_SUBMIT_ROLE_ID = "1522793232755331192";
