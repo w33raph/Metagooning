@@ -339,7 +339,7 @@ function buildApprovalEmbed(r: { userId: string; roleNames: string[]; roleIds?: 
       { name: "User", value: `<@${r.userId}>`, inline: true },
       { name: "Requested roles", value: rolesText, inline: false },
       { name: "Display name", value: r.nickname, inline: true },
-      { name: "ID", value: r.inGameId || "—", inline: true },
+      { name: "AKA", value: r.inGameId || "—", inline: true },
     )
     .setTimestamp();
 }
@@ -722,12 +722,12 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
           const userField = fields.find((f) => f.name === "User");
           const rolesField = fields.find((f) => f.name === "Requested roles");
           const nickField = fields.find((f) => f.name === "Display name");
-          const idField = fields.find((f) => f.name === "ID");
+          const akaField = fields.find((f) => f.name === "AKA");
           const userIdMatch = userField?.value?.match(/^<@!?(\d+)>$/);
           const userId = userIdMatch ? userIdMatch[1] : userField?.value?.replace(/[^0-9]/g, "") ?? null;
           const roleNames = rolesField ? rolesField.value.split(/,\s*/).map((s) => s.trim()).filter(Boolean) : [];
           const nickname = nickField?.value ?? "";
-          const inGameId = idField?.value && idField.value !== "—" ? idField.value : "";
+          const inGameId = akaField?.value && akaField.value !== "—" ? akaField.value : "";
           if (userId) {
             request = { userId, roleIds: [], roleNames, nickname, inGameId, approvalChannelId: (interaction.channel as any).id };
             // store reconstructed request under the message id so future clicks within this runtime work
@@ -929,14 +929,14 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
       nickname: selectedRoleIds.join("|"), // Store as pipe-separated for now
     });
 
-    // Show the name/ID modal
+    // Show the name/AKA modal
     const modal = new ModalBuilder().setCustomId(`role-request-final:${storedRequestId}`).setTitle("Complete Your Request");
     modal.addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder().setCustomId("requestedName").setLabel("Your Name").setStyle(TextInputStyle.Short).setRequired(true),
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder().setCustomId("requestedDiscordId").setLabel("Your ID").setStyle(TextInputStyle.Short).setRequired(false),
+        new TextInputBuilder().setCustomId("requestedAka").setLabel("AKA (Optional)").setStyle(TextInputStyle.Short).setRequired(false),
       ),
     );
 
@@ -947,7 +947,7 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
   if (interaction.isStringSelectMenu() && interaction.customId === "bot-commands-select") {
     const choice = interaction.values[0];
     let content = "";
-    if (choice === "role-request") content = "Click the role request button to start a role request flow (then fill name/ID and select roles).";
+    if (choice === "role-request") content = "Click the role request button to start a role request flow (then fill name/AKA and select roles).";
     else if (choice === "scan-register") content = "Use the Scan Register button to log scan-register results and update the leaderboard.";
     else if (choice === "setup-buttons") content = "Moderator commands: `!setuprolebutton` and `!setupbanbutton` to install interactive buttons in a channel.";
     else if (choice === "profile") content = "Shows a brief bot profile and stats.";
@@ -967,7 +967,7 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
     }
 
     const name = interaction.fields.getTextInputValue("requestedName").trim();
-    const inGameId = interaction.fields.getTextInputValue("requestedDiscordId").trim();
+    const inGameId = interaction.fields.getTextInputValue("requestedAka").trim();
     if (!name) { await interaction.reply({ content: "You must enter a name.", ephemeral: true }); return; }
 
     // Reconstruct the selected roles from stored IDs
