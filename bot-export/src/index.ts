@@ -13,6 +13,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   StringSelectMenuBuilder,
+  AuditLogEvent,
   type GuildMember,
   type Guild,
   type Message,
@@ -52,6 +53,7 @@ const REQUESTABLE_ROLE_IDS = [
 
 const BAN_SUBMIT_ROLE_ID = "1522793232755331192";
 const BAN_LOG_CHANNEL_ID = process.env["BAN_LOG_CHANNEL_ID"] || "1535921062154600500";
+const PROTECTED_CAPTURE_CHANNEL_ID = process.env["PROTECTED_CAPTURE_CHANNEL_ID"] || "1537801596765732985";
 // Prefer this channel for leaderboard updates when no env var is configured
 const BAN_LEADERBOARD_CHANNEL_ID = process.env["BAN_LEADERBOARD_CHANNEL_ID"] || "1523996882374885476";
 const DEDICATED_BAN_LOG_CHANNEL_ID = process.env["DEDICATED_BAN_LOG_CHANNEL_ID"] || "1524034321575313490";
@@ -126,19 +128,29 @@ const guildInviteCache = new Map<string, any>();
 const SECURITY_ACTION_THRESHOLD = parseInt(process.env["SECURITY_ACTION_THRESHOLD"] || "10"); // actions
 const SECURITY_ACTION_WINDOW_MS = parseInt(process.env["SECURITY_ACTION_WINDOW_MS"] || String(60 * 1000)); // 1 minute
 const SECURITY_ACTION_TIMEOUT_MS = parseInt(process.env["SECURITY_ACTION_TIMEOUT_MS"] || String(10 * 60 * 1000)); // 10 minutes
-const SECURITY_LOG_CHANNEL_ID = process.env["SECURITY_LOG_CHANNEL_ID"] || BAN_LOG_CHANNEL_ID;
+const SECURITY_LOG_CHANNEL_ID = process.env["SECURITY_LOG_CHANNEL_ID"] || "1537779343927803947";
 
 const moderatorActionTimestamps = new Map<string, number[]>();
+const suspiciousNukeActions = new Map<string, number[]>();
+
+async function logSecurityEvent(guild: Guild, title: string, fields: Array<{ name: string; value: string; inline?: boolean }>, color = "#ef4444") {
+  try {
+    const logCh = guild.channels.cache.get(SECURITY_LOG_CHANNEL_ID) ?? await client.channels.fetch(SECURITY_LOG_CHANNEL_ID).catch(() => null);
+    if (logCh && "send" in logCh) {
+      await (logCh as any).send({ embeds: [new EmbedBuilder().setTitle(title).setColor(color).addFields(...fields).setTimestamp()] }).catch(() => {});
+    }
+    appendAuditLog(`${title.toUpperCase().replace(/\s+/g, "_")} guild=${guild.id} ${fields.map((f) => `${f.name.toLowerCase().replace(/\s+/g, "_")}=${String(f.value).replace(/\s+/g, " ")}`).join(" ")}`);
+  } catch (e) { log.error("Failed to log security event:", e); }
+}
 
 async function recordModeratorAction(guild: Guild, moderatorId: string) {
   const now = Date.now();
   const arr = moderatorActionTimestamps.get(moderatorId) ?? [];
-  // keep only recent
   const filtered = arr.filter((t) => t > now - SECURITY_ACTION_WINDOW_MS);
   filtered.push(now);
   moderatorActionTimestamps.set(moderatorId, filtered);
+
   if (filtered.length > SECURITY_ACTION_THRESHOLD) {
-    // Apply timeout to the moderator to prevent further actions
     try {
       const member = await guild.members.fetch(moderatorId).catch(() => null);
       if (member && typeof (member as any).timeout === "function") {
@@ -146,21 +158,11 @@ async function recordModeratorAction(guild: Guild, moderatorId: string) {
       }
     } catch (e) { log.error("Failed to timeout moderator:", e); }
 
-    // Notify security/mod-log channel
     try {
-      const logCh = guild.channels.cache.get(SECURITY_LOG_CHANNEL_ID) ?? await client.channels.fetch(SECURITY_LOG_CHANNEL_ID).catch(() => null);
-      if (logCh && "send" in logCh) {
-        const embed = new EmbedBuilder()
-          .setTitle("Automatic Moderator Timeout")
-          .setColor("#ef4444")
-          .addFields(
-            { name: "Moderator", value: `<@${moderatorId}>`, inline: true },
-            { name: "Reason", value: "Exceeded moderator action thresholds", inline: true },
-          )
-          .setTimestamp();
-        await (logCh as any).send({ embeds: [embed] }).catch(() => {});
-      }
-      // Also log to configured timeout log channel (guild-level)
+      await logSecurityEvent(guild, "Automatic Moderator Timeout", [
+        { name: "Moderator", value: `<@${moderatorId}>`, inline: true },
+        { name: "Reason", value: "Exceeded moderator action thresholds", inline: true },
+      ]);
       const configured = timeoutLogChannels[guild.id];
       if (configured) {
         const ch = guild.channels.cache.get(configured) ?? await client.channels.fetch(configured).catch(() => null);
@@ -169,11 +171,25 @@ async function recordModeratorAction(guild: Guild, moderatorId: string) {
       appendAuditLog(`MOD_TIMEOUT guild=${guild.id} moderator=${moderatorId} reason=threshold`);
     } catch (e) { log.error("Failed to send security log:", e); }
 
-    // reset timestamps to avoid repeated timeouts
     moderatorActionTimestamps.set(moderatorId, []);
     return false;
   }
   return true;
+}
+
+async function handleNukeAttempt(guild: Guild, actorId: string, reason: string, details: string) {
+  try {
+    const member = await guild.members.fetch(actorId).catch(() => null);
+    if (member && !hasModeratorRole(member) && !member.user.bot) {
+      await guild.members.kick(actorId, "Server-nuke attempt detected").catch(() => {});
+      await logSecurityEvent(guild, "Server Nuke Attempt", [
+        { name: "User", value: `<@${actorId}>`, inline: true },
+        { name: "Reason", value: reason, inline: true },
+        { name: "Details", value: details, inline: false },
+      ], "#ef4444");
+      appendAuditLog(`NUKE_KICK guild=${guild.id} user=${actorId} reason=${reason} details=${details}`);
+    }
+  } catch (e) { log.error("Failed to handle server nuke attempt:", e); }
 }
 
 // Spam protection: track recent messages per-user-per-guild
@@ -1026,9 +1042,78 @@ client.on("guildMemberRemove", async (member) => {
   try {
     const arr = recentLeaves.get(member.id) ?? [];
     arr.unshift({ guildId: member.guild.id, guildName: member.guild.name, leftAt: Date.now() });
-    // keep last 20
     recentLeaves.set(member.id, arr.slice(0, 20));
   } catch (e) { log.error("guildMemberRemove tracking failed:", e); }
+});
+
+client.on("guildAuditLogEntryCreate", async (auditLogEntry, guild) => {
+  try {
+    const executorId = auditLogEntry.executorId;
+    if (!executorId) return;
+    const member = await guild.members.fetch(executorId).catch(() => null);
+    if (!member || member.user.bot || hasModeratorRole(member)) return;
+
+    const suspiciousActions = new Set([
+      AuditLogEvent.ChannelDelete,
+      AuditLogEvent.ChannelOverwriteDelete,
+      AuditLogEvent.RoleDelete,
+      AuditLogEvent.EmojiDelete,
+      AuditLogEvent.StickerDelete,
+      AuditLogEvent.MemberKick,
+      AuditLogEvent.Ban,
+      AuditLogEvent.GuildUpdate,
+    ]);
+
+    if (!suspiciousActions.has(auditLogEntry.action)) return;
+
+    const now = Date.now();
+    const arr = suspiciousNukeActions.get(executorId) ?? [];
+    const recent = arr.filter((ts) => ts > now - 2 * 60 * 1000);
+    recent.push(now);
+    suspiciousNukeActions.set(executorId, recent);
+
+    if (recent.length >= 2) {
+      await handleNukeAttempt(guild, executorId, "Mass destructive guild actions detected", `Audit action ${auditLogEntry.action} performed in ${guild.name}.`);
+      suspiciousNukeActions.set(executorId, []);
+    } else {
+      await logSecurityEvent(guild, "Suspicious Guild Action", [
+        { name: "User", value: `<@${executorId}>`, inline: true },
+        { name: "Action", value: String(auditLogEntry.action), inline: true },
+        { name: "Target", value: auditLogEntry.targetId ? `<@${auditLogEntry.targetId}>` : "Unknown", inline: true },
+      ], "#f59e0b");
+    }
+  } catch (e) { log.error("Failed to evaluate guild audit action:", e); }
+});
+
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  try {
+    const member = newState.member ?? oldState.member;
+    if (!member || member.user.bot || hasModeratorRole(member)) return;
+
+    const startedStreaming = !oldState.streaming && !!newState.streaming;
+    const startedVideo = !oldState.selfVideo && !!newState.selfVideo;
+    if (!startedStreaming && !startedVideo) return;
+
+    const channelId = newState.channelId ?? oldState.channelId;
+    const channelMention = channelId ? `<#${channelId}>` : "Unknown channel";
+    const type = startedStreaming ? "Screen share / stream started" : "Video started";
+
+    const isProtected = channelId === PROTECTED_CAPTURE_CHANNEL_ID;
+
+    await logSecurityEvent(newState.guild, isProtected ? "Protected Channel Capture Violation" : "Possible Capture / Share Activity", [
+      { name: "User", value: `<@${member.id}>`, inline: true },
+      { name: "Channel", value: channelMention, inline: true },
+      { name: "Type", value: type, inline: true },
+      { name: "Note", value: isProtected
+        ? "User attempted to share or record in the protected capture channel and was kicked from the server."
+        : "User started a stream or video session; capture activity was logged for review.", inline: false },
+    ], isProtected ? "#ef4444" : "#f59e0b");
+
+    if (isProtected) {
+      await newState.guild.members.kick(member.id, "Attempted screen share / capture in protected channel").catch(() => {});
+      appendAuditLog(`PROTECTED_CAPTURE_KICK guild=${newState.guild.id} user=${member.id} channel=${channelId} type=${type}`);
+    }
+  } catch (e) { log.error("Failed to log voice capture activity:", e); }
 });
 
 client.on("messageCreate", async (message): Promise<void> => {
