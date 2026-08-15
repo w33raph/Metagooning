@@ -1,9 +1,15 @@
 import fs from "fs";
 import path from "path";
 
-export type GuildSettingKey = "welcomeChannelId" | "roleApprovalChannelId" | "botCommandRoleIds";
+export type SingleValueKey = "welcomeChannelId" | "roleApprovalChannelId";
+export type MultiValueKey = "botCommandRoleIds";
+export type GuildSettingKey = SingleValueKey | MultiValueKey;
 
-export type GuildSettings = Partial<Record<GuildSettingKey, string | string[]>>;
+export type GuildSettings = Partial<{
+  welcomeChannelId: string;
+  roleApprovalChannelId: string;
+  botCommandRoleIds: string[];
+}>;
 
 const GUILD_SETTINGS_PATH = path.join(process.cwd(), "data", "guildSettings.json");
 const guildSettings = new Map<string, GuildSettings>();
@@ -39,6 +45,12 @@ export function loadGuildSettingsFromDisk(): Record<string, GuildSettings> {
 
 export function getGuildSettings(guildId: string): GuildSettings {
   return guildSettings.get(guildId) ?? {};
+}
+
+export function getBotCommandRoleIds(guildId: string): string[] {
+  const settings = getGuildSettings(guildId);
+  const roleIds = settings.botCommandRoleIds;
+  return Array.isArray(roleIds) ? roleIds : [];
 }
 
 export function setGuildSetting(guildId: string, key: GuildSettingKey, value: string | string[] | undefined) {
