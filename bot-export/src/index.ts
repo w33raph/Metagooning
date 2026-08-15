@@ -5,7 +5,6 @@ import {
   GatewayIntentBits,
   EmbedBuilder,
   AttachmentBuilder,
-  type ColorResolvable,
   PermissionsBitField,
   ActionRowBuilder,
   ButtonBuilder,
@@ -14,17 +13,15 @@ import {
   TextInputBuilder,
   TextInputStyle,
   StringSelectMenuBuilder,
-  AuditLogEvent,
   type GuildMember,
   type Guild,
   type Message,
   type Role,
 } from "discord.js";
 import banStore from "./banStore";
-import { resolveWelcomeChannel, type WelcomeChannelLike } from "./welcome";
+import { resolveWelcomeChannel } from "./welcome";
 import { buildRoleSelectionOptions, formatRequestedRoles } from "./roleRequestUi";
-import { createBotProfileEmbed, createHelpEmbed, createStandardEmbed } from "./utils/embed";
-import { getGuildSettings, setGuildSetting, getBotCommandRoleIds } from "./guildSettings";
+import { createBotProfileEmbed, createStandardEmbed } from "./utils/embed";
 
 const log = {
   info:  (...a: unknown[]) => console.log("[INFO]", ...a),
@@ -38,35 +35,6 @@ const MOD_ROLE_ID   = process.env["MODERATOR_ROLE_ID"]    || "153777934157074027
 const APPROVAL_CH   = process.env["ROLE_APPROVAL_CHANNEL_ID"] || "1537779343927803946";
 const WELCOME_CH    = process.env["WELCOME_CHANNEL_ID"]   || "1537779342296490038";
 const TOKEN         = process.env["DISCORD_TOKEN"];
-
-function getConfiguredApprovalChannelId(guildId: string): string | undefined {
-  return getGuildSettings(guildId).roleApprovalChannelId ?? APPROVAL_CH;
-}
-
-function getConfiguredWelcomeChannelId(guildId: string): string | undefined {
-  return getGuildSettings(guildId).welcomeChannelId ?? WELCOME_CH;
-}
-
-function canSendToChannel<T extends { id: string }>(channel: T | null | undefined): channel is T & { send: (...args: any[]) => Promise<any> } {
-  return !!channel && typeof channel === "object" && "send" in channel && typeof (channel as any).send === "function";
-}
-
-function resolveChannelFromInput(
-  guild: Guild,
-  input?: string,
-  fallbackChannel?: { id: string },
-) {
-  if (!input) {
-    if (fallbackChannel) return guild.channels.cache.get(fallbackChannel.id) ?? null;
-    return null;
-  }
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-  const id = trimmed.replace(/[<#>]/g, "");
-  const found = guild.channels.cache.get(id)
-    ?? guild.channels.cache.find((channel: { name: string }) => channel.name === trimmed.replace(/^#/, ""));
-  return found ?? null;
-}
 const AUTO_GRANT_INVITE_CODE = process.env["AUTO_GRANT_INVITE_CODE"] || "kngscreenshare";
 const AUTO_GRANT_ROLE_ID = process.env["AUTO_GRANT_ROLE_ID"] || "1527304379990937600";
 
@@ -84,7 +52,6 @@ const REQUESTABLE_ROLE_IDS = [
 
 const BAN_SUBMIT_ROLE_ID = "1522793232755331192";
 const BAN_LOG_CHANNEL_ID = process.env["BAN_LOG_CHANNEL_ID"] || "1535921062154600500";
-const PROTECTED_CAPTURE_CHANNEL_ID = process.env["PROTECTED_CAPTURE_CHANNEL_ID"] || "1537801596765732985";
 // Prefer this channel for leaderboard updates when no env var is configured
 const BAN_LEADERBOARD_CHANNEL_ID = process.env["BAN_LEADERBOARD_CHANNEL_ID"] || "1523996882374885476";
 const DEDICATED_BAN_LOG_CHANNEL_ID = process.env["DEDICATED_BAN_LOG_CHANNEL_ID"] || "1524034321575313490";
@@ -159,29 +126,19 @@ const guildInviteCache = new Map<string, any>();
 const SECURITY_ACTION_THRESHOLD = parseInt(process.env["SECURITY_ACTION_THRESHOLD"] || "10"); // actions
 const SECURITY_ACTION_WINDOW_MS = parseInt(process.env["SECURITY_ACTION_WINDOW_MS"] || String(60 * 1000)); // 1 minute
 const SECURITY_ACTION_TIMEOUT_MS = parseInt(process.env["SECURITY_ACTION_TIMEOUT_MS"] || String(10 * 60 * 1000)); // 10 minutes
-const SECURITY_LOG_CHANNEL_ID = process.env["SECURITY_LOG_CHANNEL_ID"] || "1537779343927803947";
+const SECURITY_LOG_CHANNEL_ID = process.env["SECURITY_LOG_CHANNEL_ID"] || BAN_LOG_CHANNEL_ID;
 
 const moderatorActionTimestamps = new Map<string, number[]>();
-const suspiciousNukeActions = new Map<string, number[]>();
-
-async function logSecurityEvent(guild: Guild, title: string, fields: Array<{ name: string; value: string; inline?: boolean }>, color: ColorResolvable = "#ef4444") {
-  try {
-    const logCh = guild.channels.cache.get(SECURITY_LOG_CHANNEL_ID) ?? await client.channels.fetch(SECURITY_LOG_CHANNEL_ID).catch(() => null);
-    if (canSendToChannel(logCh)) {
-      await logCh.send({ embeds: [new EmbedBuilder().setTitle(title).setColor(color).addFields(...fields).setTimestamp()] }).catch(() => {});
-    }
-    appendAuditLog(`${title.toUpperCase().replace(/\s+/g, "_")} guild=${guild.id} ${fields.map((f) => `${f.name.toLowerCase().replace(/\s+/g, "_")}=${String(f.value).replace(/\s+/g, " ")}`).join(" ")}`);
-  } catch (e) { log.error("Failed to log security event:", e); }
-}
 
 async function recordModeratorAction(guild: Guild, moderatorId: string) {
   const now = Date.now();
   const arr = moderatorActionTimestamps.get(moderatorId) ?? [];
+  // keep only recent
   const filtered = arr.filter((t) => t > now - SECURITY_ACTION_WINDOW_MS);
   filtered.push(now);
   moderatorActionTimestamps.set(moderatorId, filtered);
-
   if (filtered.length > SECURITY_ACTION_THRESHOLD) {
+    // Apply timeout to the moderator to prevent further actions
     try {
       const member = await guild.members.fetch(moderatorId).catch(() => null);
       if (member && typeof (member as any).timeout === "function") {
@@ -189,38 +146,34 @@ async function recordModeratorAction(guild: Guild, moderatorId: string) {
       }
     } catch (e) { log.error("Failed to timeout moderator:", e); }
 
+    // Notify security/mod-log channel
     try {
-      await logSecurityEvent(guild, "Automatic Moderator Timeout", [
-        { name: "Moderator", value: `<@${moderatorId}>`, inline: true },
-        { name: "Reason", value: "Exceeded moderator action thresholds", inline: true },
-      ]);
+      const logCh = guild.channels.cache.get(SECURITY_LOG_CHANNEL_ID) ?? await client.channels.fetch(SECURITY_LOG_CHANNEL_ID).catch(() => null);
+      if (logCh && "send" in logCh) {
+        const embed = new EmbedBuilder()
+          .setTitle("Automatic Moderator Timeout")
+          .setColor("#ef4444")
+          .addFields(
+            { name: "Moderator", value: `<@${moderatorId}>`, inline: true },
+            { name: "Reason", value: "Exceeded moderator action thresholds", inline: true },
+          )
+          .setTimestamp();
+        await (logCh as any).send({ embeds: [embed] }).catch(() => {});
+      }
+      // Also log to configured timeout log channel (guild-level)
       const configured = timeoutLogChannels[guild.id];
       if (configured) {
         const ch = guild.channels.cache.get(configured) ?? await client.channels.fetch(configured).catch(() => null);
-        if (canSendToChannel(ch as any)) await ch.send({ embeds: [new EmbedBuilder().setTitle("Timeout applied").setDescription(`<@${moderatorId}> was timed out`).setTimestamp()] }).catch(() => {});
+        if (ch && "send" in ch) await (ch as any).send({ embeds: [new EmbedBuilder().setTitle("Timeout applied").setDescription(`<@${moderatorId}> was timed out`).setTimestamp()] }).catch(() => {});
       }
       appendAuditLog(`MOD_TIMEOUT guild=${guild.id} moderator=${moderatorId} reason=threshold`);
     } catch (e) { log.error("Failed to send security log:", e); }
 
+    // reset timestamps to avoid repeated timeouts
     moderatorActionTimestamps.set(moderatorId, []);
     return false;
   }
   return true;
-}
-
-async function handleNukeAttempt(guild: Guild, actorId: string, reason: string, details: string) {
-  try {
-    const member = await guild.members.fetch(actorId).catch(() => null);
-    if (member && !hasModeratorRole(member) && !member.user.bot) {
-      await guild.members.kick(actorId, "Server-nuke attempt detected").catch(() => {});
-      await logSecurityEvent(guild, "Server Nuke Attempt", [
-        { name: "User", value: `<@${actorId}>`, inline: true },
-        { name: "Reason", value: reason, inline: true },
-        { name: "Details", value: details, inline: false },
-      ], "#ef4444");
-      appendAuditLog(`NUKE_KICK guild=${guild.id} user=${actorId} reason=${reason} details=${details}`);
-    }
-  } catch (e) { log.error("Failed to handle server nuke attempt:", e); }
 }
 
 // Spam protection: track recent messages per-user-per-guild
@@ -290,7 +243,7 @@ async function recordMessageAndCheckSpam(message: Message) {
         .setTimestamp();
       if (conf) {
         const ch = message.guild!.channels.cache.get(conf) ?? await client.channels.fetch(conf).catch(() => null);
-        if (canSendToChannel(ch as any)) await ch.send({ embeds: [embed] }).catch(() => {});
+        if (ch && "send" in ch) await (ch as any).send({ embeds: [embed] }).catch(() => {});
       }
       appendAuditLog(`AUTO_TIMEOUT guild=${message.guild!.id} user=${userId} channel=${message.channel.id} reason=spam`);
     } catch (e) { log.error("Failed to send timeout log:", e); }
@@ -301,22 +254,16 @@ async function recordMessageAndCheckSpam(message: Message) {
 
 function hasModeratorRole(member: GuildMember | null | undefined): boolean {
   if (!member) return false;
-  if (member.permissions?.has(PermissionsBitField.Flags.Administrator)) return true;
-  if (member.permissions?.has(PermissionsBitField.Flags.ManageGuild)) return true;
-
-  const configuredRoleIds = getBotCommandRoleIds(member.guild.id);
-  if (configuredRoleIds.length > 0 && configuredRoleIds.some((roleId) => member.roles.cache.has(roleId))) return true;
-
   if (member.permissions?.has(PermissionsBitField.Flags.ManageRoles)) return true;
   return member.roles.cache.some(
-    (r: Role) => r.name.toLowerCase() === MOD_ROLE_NAME.toLowerCase() || r.id === MOD_ROLE_ID,
+    (r) => r.name.toLowerCase() === MOD_ROLE_NAME.toLowerCase() || r.id === MOD_ROLE_ID,
   );
 }
 
 function hasBanSubmissionRole(member: GuildMember | null | undefined): boolean {
   if (!member) return false;
   if (hasModeratorRole(member)) return true;
-  return member.roles.cache.some((r: Role) => r.id === BAN_SUBMIT_ROLE_ID);
+  return member.roles.cache.some((r) => r.id === BAN_SUBMIT_ROLE_ID);
 }
 
 async function buildLeaderboardEmbed(guildId: string) {
@@ -370,7 +317,7 @@ function resolveRole(guild: Guild, input: string) {
   const mention = input.match(/^<@&?(\d+)>$/);
   if (mention) return guild.roles.cache.get(mention[1]!) ?? null;
   if (/^\d{17,20}$/.test(input)) return guild.roles.cache.get(input) ?? null;
-  return guild.roles.cache.find((r: Role) => r.name.toLowerCase() === input.toLowerCase()) ?? null;
+  return guild.roles.cache.find((r) => r.name.toLowerCase() === input.toLowerCase()) ?? null;
 }
 
 async function resolveMember(guild: Guild, input: string) {
@@ -392,7 +339,7 @@ function buildApprovalEmbed(r: { userId: string; roleNames: string[]; roleIds?: 
       { name: "User", value: `<@${r.userId}>`, inline: true },
       { name: "Requested roles", value: rolesText, inline: false },
       { name: "Display name", value: r.nickname, inline: true },
-      { name: "AKA", value: r.inGameId || "—", inline: true },
+      { name: "ID", value: r.inGameId || "—", inline: true },
     )
     .setTimestamp();
 }
@@ -465,6 +412,46 @@ function cleanup(msg: Message, delay = 10000) {
   setTimeout(() => msg.delete().catch(() => {}), delay);
 }
 
+async function clearMessages(channel: any, amount: number | "all"): Promise<number> {
+  if (!channel?.messages?.fetch) return 0;
+
+  let deleted = 0;
+  let before: string | undefined;
+
+  while (amount === "all" || deleted < amount) {
+    const remaining = amount === "all" ? 100 : Math.min(100, amount - deleted);
+    const fetched = await channel.messages.fetch({
+      limit: remaining,
+      ...(before ? { before } : {}),
+    }).catch(() => null);
+
+    if (!fetched || fetched.size === 0) break;
+
+    const messages: Message[] = Array.from(fetched.values() as IterableIterator<Message>);
+    const toDelete = messages.slice(0, remaining);
+    if (!toDelete.length) break;
+
+    // Discord bulk deletion only works for messages newer than 14 days.
+    const recent = toDelete.filter((m) => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
+    const old = toDelete.filter((m) => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
+
+    if (recent.length) {
+      await channel.bulkDelete(recent.map((m) => m.id), true).catch(async () => {
+        for (const m of recent) await m.delete().catch(() => {});
+      });
+    }
+
+    for (const m of old) await m.delete().catch(() => {});
+
+    deleted += toDelete.length;
+    before = toDelete[toDelete.length - 1]!.id;
+
+    if (toDelete.length < remaining) break;
+  }
+
+  return deleted;
+}
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -475,15 +462,15 @@ const client = new Client({
   ],
 });
 
-client.once("ready", () => log.info(`Discord bot ready: ${client.user?.tag}`));
+client.once("clientReady", () => log.info(`Discord bot ready: ${client.user?.tag}`));
 
-client.on("error",          (e: Error)      => log.error("Client error:", e));
-client.on("shardError",     (e: Error)      => log.error("Shard error:", e));
-client.on("shardDisconnect",(ev: { code?: number }, id: number) => log.warn(`Shard ${id} disconnected (${ev.code}) — will reconnect`));
-client.on("shardReconnecting", (id: number) => log.info(`Shard ${id} reconnecting...`));
-client.on("shardResume", (id: number) => log.info(`Shard ${id} resumed`));
+client.on("error",          (e)      => log.error("Client error:", e));
+client.on("shardError",     (e)      => log.error("Shard error:", e));
+client.on("shardDisconnect",(ev, id) => log.warn(`Shard ${id} disconnected (${ev.code}) — will reconnect`));
+client.on("shardReconnecting",(id)   => log.info(`Shard ${id} reconnecting...`));
+client.on("shardResume",    (id)     => log.info(`Shard ${id} resumed`));
 
-process.on("unhandledRejection", (r: unknown) => log.error("Unhandled rejection:", r));
+process.on("unhandledRejection", (r) => log.error("Unhandled rejection:", r));
 
 // Periodic leaderboard updater: edit stored leaderboard messages every 5 minutes
 async function updateAllLeaderboards() {
@@ -512,12 +499,12 @@ client.once("ready", async () => {
   setInterval(() => updateAllLeaderboards().catch(() => {}), 5 * 60 * 1000);
 });
 
-client.on("guildCreate", async (guild: Guild) => {
+client.on("guildCreate", async (guild) => {
   await refreshGuildInvites(guild).catch(() => {});
 });
 
 // ── Welcome ──────────────────────────────────────────────────────────────────
-client.on("guildMemberAdd", async (member: GuildMember) => {
+client.on("guildMemberAdd", async (member) => {
   try {
     const configuredCode = AUTO_GRANT_INVITE_CODE.toLowerCase();
     const vanityCode = await getGuildVanityCode(member.guild);
@@ -539,19 +526,11 @@ client.on("guildMemberAdd", async (member: GuildMember) => {
     log.error("Failed to process invite-based auto-role:", e);
   }
 
-  const configuredWelcomeChannel = getConfiguredWelcomeChannelId(member.guild.id);
-  const candidateChannel = configuredWelcomeChannel
-    ? member.guild.channels.cache.get(configuredWelcomeChannel)
-      ?? member.guild.channels.cache.find((ch: { id: string; isTextBased: () => boolean }) => ch.id === configuredWelcomeChannel && ch.isTextBased())
-      ?? resolveWelcomeChannel(configuredWelcomeChannel, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null)
-    : resolveWelcomeChannel(undefined, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null);
-
-  if (!candidateChannel || !canSendToChannel(candidateChannel as any) || !candidateChannel.isTextBased()) {
-    log.warn(`Welcome channel ${configuredWelcomeChannel ?? "default"} not available for guild ${member.guild.id}`);
+  const channel = member.guild.channels.cache.get(WELCOME_CH);
+  if (!channel?.isTextBased()) {
+    log.warn(`Welcome channel ${WELCOME_CH} not available for guild ${member.guild.id}`);
     return;
   }
-
-  const channel = candidateChannel as WelcomeChannelLike & { send: (payload: unknown) => Promise<unknown> };
 
   const n = member.guild.memberCount;
   const embed = new EmbedBuilder()
@@ -568,7 +547,7 @@ client.on("guildMemberAdd", async (member: GuildMember) => {
 });
 
 // ── Interactions ─────────────────────────────────────────────────────────────
-client.on("interactionCreate", async (interaction: any): Promise<void> => {
+client.on("interactionCreate", async (interaction): Promise<void> => {
   if (!interaction.guild) return;
 
   if (interaction.isButton()) {
@@ -680,15 +659,15 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
       if (BAN_LOG_CHANNEL_ID) {
         const logChannel = interaction.guild!.channels.cache.get(BAN_LOG_CHANNEL_ID)
           ?? await client.channels.fetch(BAN_LOG_CHANNEL_ID).catch(() => null);
-        if (canSendToChannel(logChannel as any)) {
-          try { await logChannel.send({ embeds: [embed] }); } catch (e) { log.error("Failed to send ban log message:", e); }
+        if (logChannel && "send" in logChannel) {
+          try { await (logChannel as any).send({ embeds: [embed] }); } catch (e) { log.error("Failed to send ban log message:", e); }
         }
       }
 
       try {
         const dedicatedLogChannel = await client.channels.fetch(DEDICATED_BAN_LOG_CHANNEL_ID).catch(() => null);
-        if (canSendToChannel(dedicatedLogChannel as any)) {
-          await dedicatedLogChannel.send({ embeds: [embed] });
+        if (dedicatedLogChannel && "send" in dedicatedLogChannel) {
+          await (dedicatedLogChannel as any).send({ embeds: [embed] });
         }
       } catch (e) { log.error("Failed to send to dedicated ban log channel:", e); }
 
@@ -714,14 +693,14 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
             const lbCh = interaction.guild!.channels.cache.get(BAN_LEADERBOARD_CHANNEL_ID);
             const existing = lbCh ? await findExistingLeaderboardMessage(interaction.guild!.id, lbCh as any) : null;
             if (existing) await existing.edit({ embeds: [lbEmbed] });
-            else if (canSendToChannel(lbCh as any)) { const sent = await lbCh.send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, lbCh.id, sent.id); }
+            else if (lbCh && "send" in lbCh) { const sent = await (lbCh as any).send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, (lbCh as any).id, sent.id); }
           }
         } else if (BAN_LEADERBOARD_CHANNEL_ID) {
           const lbCh = interaction.guild!.channels.cache.get(BAN_LEADERBOARD_CHANNEL_ID);
-          if (canSendToChannel(lbCh as any)) {
+          if (lbCh && "send" in lbCh) {
             const existing = await findExistingLeaderboardMessage(interaction.guild!.id, lbCh as any);
-            if (existing) { await existing.edit({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, lbCh.id, existing.id); }
-            else { const sent = await lbCh.send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, lbCh.id, sent.id); }
+            if (existing) { await existing.edit({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, (lbCh as any).id, existing.id); }
+            else { const sent = await (lbCh as any).send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, (lbCh as any).id, sent.id); }
           }
         }
       } catch (e) { log.error("Failed to update leaderboard:", e); }
@@ -780,15 +759,15 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
         const embed = msg?.embeds?.[0];
         if (embed) {
           const fields = embed.fields ?? [];
-          const userField = fields.find((f: { name: string }) => f.name === "User");
-          const rolesField = fields.find((f: { name: string }) => f.name === "Requested roles");
-          const nickField = fields.find((f: { name: string }) => f.name === "Display name");
-          const akaField = fields.find((f: { name: string }) => f.name === "AKA");
+          const userField = fields.find((f) => f.name === "User");
+          const rolesField = fields.find((f) => f.name === "Requested roles");
+          const nickField = fields.find((f) => f.name === "Display name");
+          const idField = fields.find((f) => f.name === "ID");
           const userIdMatch = userField?.value?.match(/^<@!?(\d+)>$/);
           const userId = userIdMatch ? userIdMatch[1] : userField?.value?.replace(/[^0-9]/g, "") ?? null;
-          const roleNames = rolesField ? rolesField.value.split(/,\s*/).map((s: string) => s.trim()).filter(Boolean) : [];
+          const roleNames = rolesField ? rolesField.value.split(/,\s*/).map((s) => s.trim()).filter(Boolean) : [];
           const nickname = nickField?.value ?? "";
-          const inGameId = akaField?.value && akaField.value !== "—" ? akaField.value : "";
+          const inGameId = idField?.value && idField.value !== "—" ? idField.value : "";
           if (userId) {
             request = { userId, roleIds: [], roleNames, nickname, inGameId, approvalChannelId: (interaction.channel as any).id };
             // store reconstructed request under the message id so future clicks within this runtime work
@@ -807,7 +786,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
       // Resolve roles by name when we don't have IDs
       const requestedRoles = request.roleIds.length
         ? request.roleIds.map((id) => resolveRole(interaction.guild!, id)).filter((r): r is Role => !!r)
-        : request.roleNames.map((name: string) => interaction.guild!.roles.cache.find((r: Role) => r.name === name)).filter((r): r is Role => !!r);
+        : request.roleNames.map((name) => interaction.guild!.roles.cache.find((r) => r.name === name)).filter((r): r is Role => !!r);
 
       if (!targetMember || !requestedRoles.length) {
         pendingRequests.delete(requestId);
@@ -883,8 +862,8 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
 
     const channelId = channelInput.replace(/[<#>]/g, "");
     const targetChannel = interaction.guild?.channels.cache.get(channelId)
-      ?? interaction.guild?.channels.cache.find((ch: { name: string }) => ch.name === channelInput.replace(/^#/, ""));
-    if (!canSendToChannel(targetChannel as any)) {
+      ?? interaction.guild?.channels.cache.find((ch) => ch.name === channelInput.replace(/^#/, ""));
+    if (!targetChannel || !("send" in targetChannel)) {
       await interaction.reply({ content: "Could not find that text channel.", ephemeral: true });
       return;
     }
@@ -898,8 +877,8 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
     embed.setTimestamp();
 
     try {
-      await targetChannel.send({ embeds: [embed] });
-      await interaction.reply({ content: `✅ Embed sent to <#${targetChannel.id}>`, ephemeral: true });
+      await (targetChannel as any).send({ embeds: [embed] });
+      await interaction.reply({ content: `✅ Embed sent to <#${(targetChannel as any).id}>`, ephemeral: true });
     } catch (e) {
       log.error("Failed to send embed message:", e);
       await interaction.reply({ content: "Could not send embed to that channel.", ephemeral: true });
@@ -919,7 +898,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
 
     await interaction.deferReply({ ephemeral: true });
     await interaction.guild.members.fetch();
-    const members = interaction.guild.members.cache.filter((m: GuildMember) => m.roles.cache.has(role.id) && !m.user.bot);
+    const members = interaction.guild.members.cache.filter((m) => m.roles.cache.has(role.id) && !m.user.bot);
     const embed = new EmbedBuilder()
       .setColor("#2563eb")
       .setTitle(titleInput || "ScreenShare")
@@ -974,9 +953,9 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
 
     const selectedRoleIds = interaction.values;
     const requestedRoles = selectedRoleIds
-      .map((id: string) => interaction.guild!.roles.cache.get(id))
-      .filter((r: Role | undefined): r is Role => !!r)
-      .filter((role: Role) => REQUESTABLE_ROLE_IDS.includes(role.id));
+      .map((id) => interaction.guild!.roles.cache.get(id))
+      .filter((r): r is Role => !!r)
+      .filter((role) => REQUESTABLE_ROLE_IDS.includes(role.id));
 
     if (!requestedRoles.length) {
       await interaction.reply({ content: "Please select at least one role.", ephemeral: true });
@@ -990,14 +969,14 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
       nickname: selectedRoleIds.join("|"), // Store as pipe-separated for now
     });
 
-    // Show the name/AKA modal
+    // Show the name/ID modal
     const modal = new ModalBuilder().setCustomId(`role-request-final:${storedRequestId}`).setTitle("Complete Your Request");
     modal.addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder().setCustomId("requestedName").setLabel("Your Name").setStyle(TextInputStyle.Short).setRequired(true),
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder().setCustomId("requestedAka").setLabel("AKA (Optional)").setStyle(TextInputStyle.Short).setRequired(false),
+        new TextInputBuilder().setCustomId("requestedDiscordId").setLabel("Your ID").setStyle(TextInputStyle.Short).setRequired(false),
       ),
     );
 
@@ -1008,7 +987,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
   if (interaction.isStringSelectMenu() && interaction.customId === "bot-commands-select") {
     const choice = interaction.values[0];
     let content = "";
-    if (choice === "role-request") content = "Click the role request button to start a role request flow (then fill name/AKA and select roles).";
+    if (choice === "role-request") content = "Click the role request button to start a role request flow (then fill name/ID and select roles).";
     else if (choice === "scan-register") content = "Use the Scan Register button to log scan-register results and update the leaderboard.";
     else if (choice === "setup-buttons") content = "Moderator commands: `!setuprolebutton` and `!setupbanbutton` to install interactive buttons in a channel.";
     else if (choice === "profile") content = "Shows a brief bot profile and stats.";
@@ -1028,7 +1007,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
     }
 
     const name = interaction.fields.getTextInputValue("requestedName").trim();
-    const inGameId = interaction.fields.getTextInputValue("requestedAka").trim();
+    const inGameId = interaction.fields.getTextInputValue("requestedDiscordId").trim();
     if (!name) { await interaction.reply({ content: "You must enter a name.", ephemeral: true }); return; }
 
     // Reconstruct the selected roles from stored IDs
@@ -1044,12 +1023,11 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
     }
 
     const targetMember = interaction.member as GuildMember;
-    const approvalChannelId = getConfiguredApprovalChannelId(interaction.guild.id);
-    const approvalChannel = approvalChannelId
-      ? interaction.guild.channels.cache.get(approvalChannelId) ?? interaction.channel
+    const approvalChannel = APPROVAL_CH
+      ? interaction.guild.channels.cache.get(APPROVAL_CH)
       : interaction.channel;
 
-    if (!canSendToChannel(approvalChannel as any)) {
+    if (!approvalChannel || !("send" in approvalChannel)) {
       await interaction.reply({ content: "Approval channel not configured.", ephemeral: true }); return;
     }
 
@@ -1084,85 +1062,16 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
 });
 
 // ── Message commands ──────────────────────────────────────────────────────────
-client.on("guildMemberRemove", async (member: any) => {
+client.on("guildMemberRemove", async (member) => {
   try {
     const arr = recentLeaves.get(member.id) ?? [];
     arr.unshift({ guildId: member.guild.id, guildName: member.guild.name, leftAt: Date.now() });
+    // keep last 20
     recentLeaves.set(member.id, arr.slice(0, 20));
   } catch (e) { log.error("guildMemberRemove tracking failed:", e); }
 });
 
-client.on("guildAuditLogEntryCreate", async (auditLogEntry: any, guild: any) => {
-  try {
-    const executorId = auditLogEntry.executorId;
-    if (!executorId) return;
-    const member = await guild.members.fetch(executorId).catch(() => null);
-    if (!member || member.user.bot || hasModeratorRole(member)) return;
-
-    const suspiciousActions = new Set([
-      AuditLogEvent.ChannelDelete,
-      AuditLogEvent.ChannelOverwriteDelete,
-      AuditLogEvent.RoleDelete,
-      AuditLogEvent.EmojiDelete,
-      AuditLogEvent.StickerDelete,
-      AuditLogEvent.MemberKick,
-      AuditLogEvent.MemberBanAdd,
-      AuditLogEvent.GuildUpdate,
-    ]);
-
-    if (!suspiciousActions.has(auditLogEntry.action)) return;
-
-    const now = Date.now();
-    const arr = suspiciousNukeActions.get(executorId) ?? [];
-    const recent = arr.filter((ts) => ts > now - 2 * 60 * 1000);
-    recent.push(now);
-    suspiciousNukeActions.set(executorId, recent);
-
-    if (recent.length >= 2) {
-      await handleNukeAttempt(guild, executorId, "Mass destructive guild actions detected", `Audit action ${auditLogEntry.action} performed in ${guild.name}.`);
-      suspiciousNukeActions.set(executorId, []);
-    } else {
-      await logSecurityEvent(guild, "Suspicious Guild Action", [
-        { name: "User", value: `<@${executorId}>`, inline: true },
-        { name: "Action", value: String(auditLogEntry.action), inline: true },
-        { name: "Target", value: auditLogEntry.targetId ? `<@${auditLogEntry.targetId}>` : "Unknown", inline: true },
-      ], "#f59e0b");
-    }
-  } catch (e) { log.error("Failed to evaluate guild audit action:", e); }
-});
-
-client.on("voiceStateUpdate", async (oldState: any, newState: any) => {
-  try {
-    const member = newState.member ?? oldState.member;
-    if (!member || member.user.bot || hasModeratorRole(member)) return;
-
-    const startedStreaming = !oldState.streaming && !!newState.streaming;
-    const startedVideo = !oldState.selfVideo && !!newState.selfVideo;
-    if (!startedStreaming && !startedVideo) return;
-
-    const channelId = newState.channelId ?? oldState.channelId;
-    const channelMention = channelId ? `<#${channelId}>` : "Unknown channel";
-    const type = startedStreaming ? "Screen share / stream started" : "Video started";
-
-    const isProtected = channelId === PROTECTED_CAPTURE_CHANNEL_ID;
-
-    await logSecurityEvent(newState.guild, isProtected ? "Protected Channel Capture Violation" : "Possible Capture / Share Activity", [
-      { name: "User", value: `<@${member.id}>`, inline: true },
-      { name: "Channel", value: channelMention, inline: true },
-      { name: "Type", value: type, inline: true },
-      { name: "Note", value: isProtected
-        ? "User attempted to share or record in the protected capture channel and was kicked from the server."
-        : "User started a stream or video session; capture activity was logged for review.", inline: false },
-    ], isProtected ? "#ef4444" : "#f59e0b");
-
-    if (isProtected) {
-      await newState.guild.members.kick(member.id, "Attempted screen share / capture in protected channel").catch(() => {});
-      appendAuditLog(`PROTECTED_CAPTURE_KICK guild=${newState.guild.id} user=${member.id} channel=${channelId} type=${type}`);
-    }
-  } catch (e) { log.error("Failed to log voice capture activity:", e); }
-});
-
-client.on("messageCreate", async (message: Message): Promise<void> => {
+client.on("messageCreate", async (message): Promise<void> => {
   if (!message.guild || message.author.bot) return;
 
   // Spam protection (non-mods/bots)
@@ -1183,86 +1092,49 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
   const command = args.shift()?.toLowerCase();
   if (!command) return;
 
-  // !roleacceptchannel [#channel|channelId]
-  if (command === "roleacceptchannel") {
-    if (!hasModeratorRole(message.member)) { const r = await message.reply("Only moderators can use this."); cleanup(r); return; }
-
-    const targetChannel = resolveChannelFromInput(message.guild, args[0], message.channel) ?? message.channel;
-    if (!canSendToChannel(targetChannel)) {
-      const r = await message.reply("Could not find that text channel."); cleanup(r); return;
-    }
-
-    setGuildSetting(message.guild.id, "roleApprovalChannelId", targetChannel.id);
-    const r = await message.channel.send(`Role approval channel set to <#${targetChannel.id}>.`);
-    cleanup(r, 10000);
-    return;
-  }
-
-  // !welcome [#channel|channelId]
-  if (command === "welcome") {
-    if (!hasModeratorRole(message.member)) { const r = await message.reply("Only moderators can use this."); cleanup(r); return; }
-
-    const targetChannel = resolveChannelFromInput(message.guild, args[0], message.channel) ?? message.channel;
-    if (!canSendToChannel(targetChannel)) {
-      const r = await message.reply("Could not find that text channel."); cleanup(r); return;
-    }
-
-    setGuildSetting(message.guild.id, "welcomeChannelId", targetChannel.id);
-    const r = await message.channel.send(`Welcome channel set to <#${targetChannel.id}>.`);
-    cleanup(r, 10000);
-    return;
-  }
-
-  // !botperms [@role ...|off]
-  if (command === "botperms") {
-    if (!message.member) return;
-    const canManageServer = message.member.permissions?.has(PermissionsBitField.Flags.Administrator)
-      || message.member.permissions?.has(PermissionsBitField.Flags.ManageGuild);
-    if (!canManageServer) {
-      const r = await message.reply("Only server administrators can change bot command permissions.");
+  // !clear all / !clear <number>
+  if (command === "clear") {
+    if (!hasModeratorRole(message.member)) {
+      const r = await message.reply("Only moderators can use this.");
       cleanup(r);
       return;
     }
 
-    if (!args.length) {
-      const configuredRoleIds = getBotCommandRoleIds(message.guild.id);
-      if (!configuredRoleIds.length) {
-        const r = await message.channel.send("No custom bot command roles are configured. The default moderator role is still in use.");
-        cleanup(r, 10000);
-        return;
-      }
+    const target = args[0]?.toLowerCase();
 
-      const roleNames = await Promise.all(configuredRoleIds.map(async (roleId) => {
-        const role = message.guild.roles.cache.get(roleId) ?? await message.guild.roles.fetch(roleId).catch(() => null);
-        return role ? role.toString() : `<@&${roleId}>`;
-      }));
-
-      const r = await message.channel.send(`Current bot command access: ${roleNames.join(", ")}`);
-      cleanup(r, 15000);
-      return;
-    }
-
-    if (args[0].toLowerCase() === "off") {
-      setGuildSetting(message.guild.id, "botCommandRoleIds", undefined);
-      const r = await message.channel.send("Bot command access reset to the default moderator role settings.");
-      cleanup(r, 10000);
-      return;
-    }
-
-    const roles = args
-      .map((arg: string) => resolveRole(message.guild, arg))
-      .filter((role): role is Role => Boolean(role));
-
-    if (!roles.length) {
-      const r = await message.reply("Could not find any valid roles in that input.");
+    if (!target || (target !== "all" && !/^\d+$/.test(target))) {
+      const r = await message.reply(`Usage: ${PREFIX}clear all or ${PREFIX}clear <number>`);
       cleanup(r);
       return;
     }
 
-    const uniqueRoleIds = [...new Set(roles.map((role: Role) => role.id))];
-    setGuildSetting(message.guild.id, "botCommandRoleIds", uniqueRoleIds);
-    const r = await message.channel.send(`Bot command access set to ${roles.map((role: Role) => role.toString()).join(", ")}.`);
-    cleanup(r, 15000);
+    const amount = target === "all" ? "all" : Number(target);
+
+    if (amount !== "all" && (amount < 1 || amount > 10000)) {
+      const r = await message.reply("Please choose a number between 1 and 10000.");
+      cleanup(r);
+      return;
+    }
+
+    const channel = message.channel as any;
+    if (!channel?.messages?.fetch || typeof channel.bulkDelete !== "function") {
+      const r = await message.reply("This command can only be used in a text channel.");
+      cleanup(r);
+      return;
+    }
+
+    try {
+      // Include the !clear command itself in the deletion count.
+      const deleted = await clearMessages(channel, amount);
+      const confirmation = await channel.send(
+        `🧹 Cleared **${deleted}** message${deleted === 1 ? "" : "s"}${amount === "all" ? " (all available messages)" : ""}.`
+      );
+      cleanup(confirmation, 5000);
+    } catch (e) {
+      log.error("clear command:", e);
+      const r = await message.channel.send("I couldn't clear the messages. Make sure I have **Manage Messages** permission.");
+      cleanup(r, 5000);
+    }
     return;
   }
 
@@ -1337,18 +1209,18 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
     const embed = await buildLeaderboardEmbed(message.guild.id);
     if (BAN_LEADERBOARD_CHANNEL_ID) {
       const lbCh = message.guild.channels.cache.get(BAN_LEADERBOARD_CHANNEL_ID);
-      if (canSendToChannel(lbCh as any)) {
+      if (lbCh && "send" in lbCh) {
         try {
           console.log("Posting leaderboard command for guild", message.guild.id);
           const existing = await findExistingLeaderboardMessage(message.guild.id, lbCh as any);
           if (existing) {
             console.log("Editing existing leaderboard message", existing.id);
             await existing.edit({ embeds: [embed] });
-            banStore.setLeaderboardMessage(message.guild.id, lbCh.id, existing.id);
+            banStore.setLeaderboardMessage(message.guild.id, (lbCh as any).id, existing.id);
           } else {
-            console.log("Sending new leaderboard message to channel", lbCh.id);
-            const sent = await lbCh.send({ embeds: [embed] });
-            banStore.setLeaderboardMessage(message.guild.id, lbCh.id, sent.id);
+            console.log("Sending new leaderboard message to channel", (lbCh as any).id);
+            const sent = await (lbCh as any).send({ embeds: [embed] });
+            banStore.setLeaderboardMessage(message.guild.id, (lbCh as any).id, sent.id);
           }
         } catch (e) { log.error("Failed to send/edit leaderboard:", e); }
         const info = await message.channel.send(`Leaderboard posted to <#${BAN_LEADERBOARD_CHANNEL_ID}>`);
@@ -1363,7 +1235,7 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
   }
 
   // !bot - show bot profile and commands dropdown
-  if (command === "bot") {
+  if (command === "bot" || command === "help") {
     const embed = createBotProfileEmbed(client as any);
     const menu = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
       new StringSelectMenuBuilder()
@@ -1378,12 +1250,6 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
     );
 
     await message.channel.send({ embeds: [embed], components: [menu] });
-    return;
-  }
-
-  if (command === "help") {
-    const embed = createHelpEmbed();
-    await message.channel.send({ embeds: [embed] });
     return;
   }
 
@@ -1436,7 +1302,7 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
     }
     const channelId = arg.replace(/[<#>]/g, "");
     const targetCh = message.guild.channels.cache.get(channelId) ?? await client.channels.fetch(channelId).catch(() => null);
-    if (!canSendToChannel(targetCh as any)) { const r = await message.channel.send("Could not find that text channel in this server."); cleanup(r); return; }
+    if (!targetCh || !("send" in targetCh)) { const r = await message.channel.send("Could not find that text channel in this server."); cleanup(r); return; }
     timeoutLogChannels[message.guild.id] = (targetCh as any).id;
     saveTimeoutLogChannels(timeoutLogChannels);
     const r = await message.channel.send(`Timeout log channel set to <#${(targetCh as any).id}>`);
