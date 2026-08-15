@@ -36,7 +36,7 @@ const MOD_ROLE_NAME = process.env["MODERATOR_ROLE_NAME"]  || "moderator";
 const MOD_ROLE_ID   = process.env["MODERATOR_ROLE_ID"]    || "1537779341570740271";
 const APPROVAL_CH   = process.env["ROLE_APPROVAL_CHANNEL_ID"] || "1537779343927803946";
 const WELCOME_CH    = process.env["WELCOME_CHANNEL_ID"]   || "1537779342296490038";
-const TOKEN         = process.env["DISCORD_TOKEN"];
+const TOKEN         = process.env["DISCORD_TOKEN"] || process.env["TOKEN"];
 
 function getConfiguredApprovalChannelId(guildId: string): string | undefined {
   return getGuildSettings(guildId).roleApprovalChannelId ?? APPROVAL_CH;
@@ -62,7 +62,7 @@ const AUTO_GRANT_INVITE_CODE = process.env["AUTO_GRANT_INVITE_CODE"] || "kngscre
 const AUTO_GRANT_ROLE_ID = process.env["AUTO_GRANT_ROLE_ID"] || "1527304379990937600";
 
 if (!TOKEN) {
-  console.error("DISCORD_TOKEN is not set — exiting.");
+  console.error("Neither DISCORD_TOKEN nor TOKEN is set — exiting.");
   process.exit(1);
 }
 
