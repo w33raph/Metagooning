@@ -5,6 +5,7 @@ import {
   GatewayIntentBits,
   EmbedBuilder,
   AttachmentBuilder,
+  type ColorResolvable,
   PermissionsBitField,
   ActionRowBuilder,
   ButtonBuilder,
@@ -20,7 +21,7 @@ import {
   type Role,
 } from "discord.js";
 import banStore from "./banStore";
-import { resolveWelcomeChannel } from "./welcome";
+import { resolveWelcomeChannel, type WelcomeChannelLike } from "./welcome";
 import { buildRoleSelectionOptions, formatRequestedRoles } from "./roleRequestUi";
 import { createBotProfileEmbed, createHelpEmbed, createStandardEmbed } from "./utils/embed";
 import { getGuildSettings, setGuildSetting, getBotCommandRoleIds } from "./guildSettings";
@@ -155,7 +156,7 @@ const SECURITY_LOG_CHANNEL_ID = process.env["SECURITY_LOG_CHANNEL_ID"] || "15377
 const moderatorActionTimestamps = new Map<string, number[]>();
 const suspiciousNukeActions = new Map<string, number[]>();
 
-async function logSecurityEvent(guild: Guild, title: string, fields: Array<{ name: string; value: string; inline?: boolean }>, color = "#ef4444") {
+async function logSecurityEvent(guild: Guild, title: string, fields: Array<{ name: string; value: string; inline?: boolean }>, color: ColorResolvable = "#ef4444") {
   try {
     const logCh = guild.channels.cache.get(SECURITY_LOG_CHANNEL_ID) ?? await client.channels.fetch(SECURITY_LOG_CHANNEL_ID).catch(() => null);
     if (logCh && "send" in logCh) {
@@ -466,7 +467,7 @@ const client = new Client({
   ],
 });
 
-client.once("clientReady", () => log.info(`Discord bot ready: ${client.user?.tag}`));
+client.once("ready", () => log.info(`Discord bot ready: ${client.user?.tag}`));
 
 client.on("error",          (e)      => log.error("Client error:", e));
 client.on("shardError",     (e)      => log.error("Shard error:", e));
@@ -531,12 +532,14 @@ client.on("guildMemberAdd", async (member) => {
   }
 
   const configuredWelcomeChannel = getConfiguredWelcomeChannelId(member.guild.id);
-  const channel = member.guild.channels.cache.get(configuredWelcomeChannel)
-    ?? member.guild.channels.cache.find((ch) => ch.id === configuredWelcomeChannel && ch.isTextBased())
-    ?? resolveWelcomeChannel(configuredWelcomeChannel, Array.from(member.guild.channels.cache.values()), member.guild.systemChannel ?? null);
+  const channel = configuredWelcomeChannel
+    ? member.guild.channels.cache.get(configuredWelcomeChannel)
+      ?? member.guild.channels.cache.find((ch) => ch.id === configuredWelcomeChannel && ch.isTextBased())
+      ?? resolveWelcomeChannel(configuredWelcomeChannel, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null)
+    : resolveWelcomeChannel(undefined, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null);
 
-  if (!channel?.isTextBased()) {
-    log.warn(`Welcome channel ${configuredWelcomeChannel} not available for guild ${member.guild.id}`);
+  if (!channel || !channel.isTextBased()) {
+    log.warn(`Welcome channel ${configuredWelcomeChannel ?? "default"} not available for guild ${member.guild.id}`);
     return;
   }
 

@@ -1,6 +1,7 @@
 export interface WelcomeChannelLike {
   id: string;
   isTextBased(): boolean;
+  send(...args: unknown[]): Promise<unknown>;
 }
 
 export function resolveWelcomeChannel(
