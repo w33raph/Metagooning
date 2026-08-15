@@ -47,6 +47,10 @@ function getConfiguredWelcomeChannelId(guildId: string): string | undefined {
   return getGuildSettings(guildId).welcomeChannelId ?? WELCOME_CH;
 }
 
+function canSendToChannel<T extends { id: string }>(channel: T | null | undefined): channel is T & { send: (...args: any[]) => Promise<any> } {
+  return !!channel && typeof channel === "object" && "send" in channel && typeof (channel as any).send === "function";
+}
+
 function resolveChannelFromInput(
   guild: Guild,
   input?: string,
@@ -163,8 +167,8 @@ const suspiciousNukeActions = new Map<string, number[]>();
 async function logSecurityEvent(guild: Guild, title: string, fields: Array<{ name: string; value: string; inline?: boolean }>, color: ColorResolvable = "#ef4444") {
   try {
     const logCh = guild.channels.cache.get(SECURITY_LOG_CHANNEL_ID) ?? await client.channels.fetch(SECURITY_LOG_CHANNEL_ID).catch(() => null);
-    if (logCh && "send" in logCh) {
-      await (logCh as any).send({ embeds: [new EmbedBuilder().setTitle(title).setColor(color).addFields(...fields).setTimestamp()] }).catch(() => {});
+    if (canSendToChannel(logCh)) {
+      await logCh.send({ embeds: [new EmbedBuilder().setTitle(title).setColor(color).addFields(...fields).setTimestamp()] }).catch(() => {});
     }
     appendAuditLog(`${title.toUpperCase().replace(/\s+/g, "_")} guild=${guild.id} ${fields.map((f) => `${f.name.toLowerCase().replace(/\s+/g, "_")}=${String(f.value).replace(/\s+/g, " ")}`).join(" ")}`);
   } catch (e) { log.error("Failed to log security event:", e); }
@@ -193,7 +197,7 @@ async function recordModeratorAction(guild: Guild, moderatorId: string) {
       const configured = timeoutLogChannels[guild.id];
       if (configured) {
         const ch = guild.channels.cache.get(configured) ?? await client.channels.fetch(configured).catch(() => null);
-        if (ch && "send" in ch) await (ch as any).send({ embeds: [new EmbedBuilder().setTitle("Timeout applied").setDescription(`<@${moderatorId}> was timed out`).setTimestamp()] }).catch(() => {});
+        if (canSendToChannel(ch as any)) await ch.send({ embeds: [new EmbedBuilder().setTitle("Timeout applied").setDescription(`<@${moderatorId}> was timed out`).setTimestamp()] }).catch(() => {});
       }
       appendAuditLog(`MOD_TIMEOUT guild=${guild.id} moderator=${moderatorId} reason=threshold`);
     } catch (e) { log.error("Failed to send security log:", e); }
@@ -286,7 +290,7 @@ async function recordMessageAndCheckSpam(message: Message) {
         .setTimestamp();
       if (conf) {
         const ch = message.guild!.channels.cache.get(conf) ?? await client.channels.fetch(conf).catch(() => null);
-        if (ch && "send" in ch) await (ch as any).send({ embeds: [embed] }).catch(() => {});
+        if (canSendToChannel(ch as any)) await ch.send({ embeds: [embed] }).catch(() => {});
       }
       appendAuditLog(`AUTO_TIMEOUT guild=${message.guild!.id} user=${userId} channel=${message.channel.id} reason=spam`);
     } catch (e) { log.error("Failed to send timeout log:", e); }
@@ -542,7 +546,7 @@ client.on("guildMemberAdd", async (member: GuildMember) => {
       ?? resolveWelcomeChannel(configuredWelcomeChannel, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null)
     : resolveWelcomeChannel(undefined, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null);
 
-  if (!candidateChannel || !("send" in candidateChannel) || !candidateChannel.isTextBased()) {
+  if (!candidateChannel || !canSendToChannel(candidateChannel as any) || !candidateChannel.isTextBased()) {
     log.warn(`Welcome channel ${configuredWelcomeChannel ?? "default"} not available for guild ${member.guild.id}`);
     return;
   }
@@ -676,15 +680,15 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
       if (BAN_LOG_CHANNEL_ID) {
         const logChannel = interaction.guild!.channels.cache.get(BAN_LOG_CHANNEL_ID)
           ?? await client.channels.fetch(BAN_LOG_CHANNEL_ID).catch(() => null);
-        if (logChannel && "send" in logChannel) {
-          try { await (logChannel as any).send({ embeds: [embed] }); } catch (e) { log.error("Failed to send ban log message:", e); }
+        if (canSendToChannel(logChannel as any)) {
+          try { await logChannel.send({ embeds: [embed] }); } catch (e) { log.error("Failed to send ban log message:", e); }
         }
       }
 
       try {
         const dedicatedLogChannel = await client.channels.fetch(DEDICATED_BAN_LOG_CHANNEL_ID).catch(() => null);
-        if (dedicatedLogChannel && "send" in dedicatedLogChannel) {
-          await (dedicatedLogChannel as any).send({ embeds: [embed] });
+        if (canSendToChannel(dedicatedLogChannel as any)) {
+          await dedicatedLogChannel.send({ embeds: [embed] });
         }
       } catch (e) { log.error("Failed to send to dedicated ban log channel:", e); }
 
@@ -710,14 +714,14 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
             const lbCh = interaction.guild!.channels.cache.get(BAN_LEADERBOARD_CHANNEL_ID);
             const existing = lbCh ? await findExistingLeaderboardMessage(interaction.guild!.id, lbCh as any) : null;
             if (existing) await existing.edit({ embeds: [lbEmbed] });
-            else if (lbCh && "send" in lbCh) { const sent = await (lbCh as any).send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, (lbCh as any).id, sent.id); }
+            else if (canSendToChannel(lbCh as any)) { const sent = await lbCh.send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, lbCh.id, sent.id); }
           }
         } else if (BAN_LEADERBOARD_CHANNEL_ID) {
           const lbCh = interaction.guild!.channels.cache.get(BAN_LEADERBOARD_CHANNEL_ID);
-          if (lbCh && "send" in lbCh) {
+          if (canSendToChannel(lbCh as any)) {
             const existing = await findExistingLeaderboardMessage(interaction.guild!.id, lbCh as any);
-            if (existing) { await existing.edit({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, (lbCh as any).id, existing.id); }
-            else { const sent = await (lbCh as any).send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, (lbCh as any).id, sent.id); }
+            if (existing) { await existing.edit({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, lbCh.id, existing.id); }
+            else { const sent = await lbCh.send({ embeds: [lbEmbed] }); banStore.setLeaderboardMessage(interaction.guild!.id, lbCh.id, sent.id); }
           }
         }
       } catch (e) { log.error("Failed to update leaderboard:", e); }
@@ -880,7 +884,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
     const channelId = channelInput.replace(/[<#>]/g, "");
     const targetChannel = interaction.guild?.channels.cache.get(channelId)
       ?? interaction.guild?.channels.cache.find((ch: { name: string }) => ch.name === channelInput.replace(/^#/, ""));
-    if (!targetChannel || !("send" in targetChannel)) {
+    if (!canSendToChannel(targetChannel as any)) {
       await interaction.reply({ content: "Could not find that text channel.", ephemeral: true });
       return;
     }
@@ -894,8 +898,8 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
     embed.setTimestamp();
 
     try {
-      await (targetChannel as any).send({ embeds: [embed] });
-      await interaction.reply({ content: `✅ Embed sent to <#${(targetChannel as any).id}>`, ephemeral: true });
+      await targetChannel.send({ embeds: [embed] });
+      await interaction.reply({ content: `✅ Embed sent to <#${targetChannel.id}>`, ephemeral: true });
     } catch (e) {
       log.error("Failed to send embed message:", e);
       await interaction.reply({ content: "Could not send embed to that channel.", ephemeral: true });
@@ -1045,7 +1049,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
       ? interaction.guild.channels.cache.get(approvalChannelId) ?? interaction.channel
       : interaction.channel;
 
-    if (!approvalChannel || !("send" in approvalChannel)) {
+    if (!canSendToChannel(approvalChannel as any)) {
       await interaction.reply({ content: "Approval channel not configured.", ephemeral: true }); return;
     }
 
@@ -1080,7 +1084,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
 });
 
 // ── Message commands ──────────────────────────────────────────────────────────
-client.on("guildMemberRemove", async (member: GuildMember) => {
+client.on("guildMemberRemove", async (member: any) => {
   try {
     const arr = recentLeaves.get(member.id) ?? [];
     arr.unshift({ guildId: member.guild.id, guildName: member.guild.name, leftAt: Date.now() });
@@ -1088,7 +1092,7 @@ client.on("guildMemberRemove", async (member: GuildMember) => {
   } catch (e) { log.error("guildMemberRemove tracking failed:", e); }
 });
 
-client.on("guildAuditLogEntryCreate", async (auditLogEntry: any, guild: Guild) => {
+client.on("guildAuditLogEntryCreate", async (auditLogEntry: any, guild: any) => {
   try {
     const executorId = auditLogEntry.executorId;
     if (!executorId) return;
@@ -1184,7 +1188,7 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
     if (!hasModeratorRole(message.member)) { const r = await message.reply("Only moderators can use this."); cleanup(r); return; }
 
     const targetChannel = resolveChannelFromInput(message.guild, args[0], message.channel) ?? message.channel;
-    if (!("send" in targetChannel)) {
+    if (!canSendToChannel(targetChannel)) {
       const r = await message.reply("Could not find that text channel."); cleanup(r); return;
     }
 
@@ -1199,7 +1203,7 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
     if (!hasModeratorRole(message.member)) { const r = await message.reply("Only moderators can use this."); cleanup(r); return; }
 
     const targetChannel = resolveChannelFromInput(message.guild, args[0], message.channel) ?? message.channel;
-    if (!("send" in targetChannel)) {
+    if (!canSendToChannel(targetChannel)) {
       const r = await message.reply("Could not find that text channel."); cleanup(r); return;
     }
 
@@ -1333,18 +1337,18 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
     const embed = await buildLeaderboardEmbed(message.guild.id);
     if (BAN_LEADERBOARD_CHANNEL_ID) {
       const lbCh = message.guild.channels.cache.get(BAN_LEADERBOARD_CHANNEL_ID);
-      if (lbCh && "send" in lbCh) {
+      if (canSendToChannel(lbCh as any)) {
         try {
           console.log("Posting leaderboard command for guild", message.guild.id);
           const existing = await findExistingLeaderboardMessage(message.guild.id, lbCh as any);
           if (existing) {
             console.log("Editing existing leaderboard message", existing.id);
             await existing.edit({ embeds: [embed] });
-            banStore.setLeaderboardMessage(message.guild.id, (lbCh as any).id, existing.id);
+            banStore.setLeaderboardMessage(message.guild.id, lbCh.id, existing.id);
           } else {
-            console.log("Sending new leaderboard message to channel", (lbCh as any).id);
-            const sent = await (lbCh as any).send({ embeds: [embed] });
-            banStore.setLeaderboardMessage(message.guild.id, (lbCh as any).id, sent.id);
+            console.log("Sending new leaderboard message to channel", lbCh.id);
+            const sent = await lbCh.send({ embeds: [embed] });
+            banStore.setLeaderboardMessage(message.guild.id, lbCh.id, sent.id);
           }
         } catch (e) { log.error("Failed to send/edit leaderboard:", e); }
         const info = await message.channel.send(`Leaderboard posted to <#${BAN_LEADERBOARD_CHANNEL_ID}>`);
@@ -1432,7 +1436,7 @@ client.on("messageCreate", async (message: Message): Promise<void> => {
     }
     const channelId = arg.replace(/[<#>]/g, "");
     const targetCh = message.guild.channels.cache.get(channelId) ?? await client.channels.fetch(channelId).catch(() => null);
-    if (!targetCh || !("send" in targetCh)) { const r = await message.channel.send("Could not find that text channel in this server."); cleanup(r); return; }
+    if (!canSendToChannel(targetCh as any)) { const r = await message.channel.send("Could not find that text channel in this server."); cleanup(r); return; }
     timeoutLogChannels[message.guild.id] = (targetCh as any).id;
     saveTimeoutLogChannels(timeoutLogChannels);
     const r = await message.channel.send(`Timeout log channel set to <#${(targetCh as any).id}>`);
