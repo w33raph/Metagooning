@@ -970,9 +970,9 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
 
     const selectedRoleIds = interaction.values;
     const requestedRoles = selectedRoleIds
-      .map((id) => interaction.guild!.roles.cache.get(id))
-      .filter((r): r is Role => !!r)
-      .filter((role) => REQUESTABLE_ROLE_IDS.includes(role.id));
+      .map((id: string) => interaction.guild!.roles.cache.get(id))
+      .filter((r: Role | undefined): r is Role => !!r)
+      .filter((role: Role) => REQUESTABLE_ROLE_IDS.includes(role.id));
 
     if (!requestedRoles.length) {
       await interaction.reply({ content: "Please select at least one role.", ephemeral: true });
@@ -1080,7 +1080,7 @@ client.on("interactionCreate", async (interaction: any): Promise<void> => {
 });
 
 // ── Message commands ──────────────────────────────────────────────────────────
-client.on("guildMemberRemove", async (member) => {
+client.on("guildMemberRemove", async (member: GuildMember) => {
   try {
     const arr = recentLeaves.get(member.id) ?? [];
     arr.unshift({ guildId: member.guild.id, guildName: member.guild.name, leftAt: Date.now() });
@@ -1088,7 +1088,7 @@ client.on("guildMemberRemove", async (member) => {
   } catch (e) { log.error("guildMemberRemove tracking failed:", e); }
 });
 
-client.on("guildAuditLogEntryCreate", async (auditLogEntry, guild) => {
+client.on("guildAuditLogEntryCreate", async (auditLogEntry: any, guild: Guild) => {
   try {
     const executorId = auditLogEntry.executorId;
     if (!executorId) return;
@@ -1127,7 +1127,7 @@ client.on("guildAuditLogEntryCreate", async (auditLogEntry, guild) => {
   } catch (e) { log.error("Failed to evaluate guild audit action:", e); }
 });
 
-client.on("voiceStateUpdate", async (oldState, newState) => {
+client.on("voiceStateUpdate", async (oldState: any, newState: any) => {
   try {
     const member = newState.member ?? oldState.member;
     if (!member || member.user.bot || hasModeratorRole(member)) return;
@@ -1158,7 +1158,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   } catch (e) { log.error("Failed to log voice capture activity:", e); }
 });
 
-client.on("messageCreate", async (message): Promise<void> => {
+client.on("messageCreate", async (message: Message): Promise<void> => {
   if (!message.guild || message.author.bot) return;
 
   // Spam protection (non-mods/bots)
@@ -1246,7 +1246,7 @@ client.on("messageCreate", async (message): Promise<void> => {
     }
 
     const roles = args
-      .map((arg) => resolveRole(message.guild, arg))
+      .map((arg: string) => resolveRole(message.guild, arg))
       .filter((role): role is Role => Boolean(role));
 
     if (!roles.length) {
@@ -1255,9 +1255,9 @@ client.on("messageCreate", async (message): Promise<void> => {
       return;
     }
 
-    const uniqueRoleIds = [...new Set(roles.map((role) => role.id))];
+    const uniqueRoleIds = [...new Set(roles.map((role: Role) => role.id))];
     setGuildSetting(message.guild.id, "botCommandRoleIds", uniqueRoleIds);
-    const r = await message.channel.send(`Bot command access set to ${roles.map((role) => role.toString()).join(", ")}.`);
+    const r = await message.channel.send(`Bot command access set to ${roles.map((role: Role) => role.toString()).join(", ")}.`);
     cleanup(r, 15000);
     return;
   }
