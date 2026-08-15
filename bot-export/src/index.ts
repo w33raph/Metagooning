@@ -1211,31 +1211,32 @@ client.on("messageCreate", async (message): Promise<void> => {
       return;
     }
 
-    const configuredRoleIds = getBotCommandRoleIds(message.guild.id);
-    if (!configuredRoleIds.length) {
-      const r = await message.channel.send("No custom bot command roles are configured. The default moderator role is still in use.");
-      cleanup(r, 10000);
-      return;
-    }
+    if (!args.length) {
+      const configuredRoleIds = getBotCommandRoleIds(message.guild.id);
+      if (!configuredRoleIds.length) {
+        const r = await message.channel.send("No custom bot command roles are configured. The default moderator role is still in use.");
+        cleanup(r, 10000);
+        return;
+      }
 
-    const roleNames = await Promise.all(configuredRoleIds.map(async (roleId) => {
-      const role = message.guild.roles.cache.get(roleId) ?? await message.guild.roles.fetch(roleId).catch(() => null);
-      return role ? role.toString() : `<@&${roleId}>`;
-    }));
+      const roleNames = await Promise.all(configuredRoleIds.map(async (roleId) => {
+        const role = message.guild.roles.cache.get(roleId) ?? await message.guild.roles.fetch(roleId).catch(() => null);
+        return role ? role.toString() : `<@&${roleId}>`;
+      }));
 
       const r = await message.channel.send(`Current bot command access: ${roleNames.join(", ")}`);
       cleanup(r, 15000);
       return;
     }
 
-    if (suppliedArgs[0].toLowerCase() === "off") {
+    if (args[0].toLowerCase() === "off") {
       setGuildSetting(message.guild.id, "botCommandRoleIds", undefined);
       const r = await message.channel.send("Bot command access reset to the default moderator role settings.");
       cleanup(r, 10000);
       return;
     }
 
-    const roles = suppliedArgs
+    const roles = args
       .map((arg) => resolveRole(message.guild, arg))
       .filter((role): role is Role => Boolean(role));
 
