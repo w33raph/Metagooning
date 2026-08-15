@@ -22,7 +22,8 @@ import {
 import banStore from "./banStore";
 import { resolveWelcomeChannel } from "./welcome";
 import { buildRoleSelectionOptions, formatRequestedRoles } from "./roleRequestUi";
-import { createBotProfileEmbed, createStandardEmbed } from "./utils/embed";
+import { createBotProfileEmbed, createHelpEmbed, createStandardEmbed } from "./utils/embed";
+import { getGuildSettings, setGuildSetting } from "./guildSettings";
 
 const log = {
   info:  (...a: unknown[]) => console.log("[INFO]", ...a),
@@ -36,6 +37,27 @@ const MOD_ROLE_ID   = process.env["MODERATOR_ROLE_ID"]    || "153777934157074027
 const APPROVAL_CH   = process.env["ROLE_APPROVAL_CHANNEL_ID"] || "1537779343927803946";
 const WELCOME_CH    = process.env["WELCOME_CHANNEL_ID"]   || "1537779342296490038";
 const TOKEN         = process.env["DISCORD_TOKEN"];
+
+function getConfiguredApprovalChannelId(guildId: string): string | undefined {
+  return getGuildSettings(guildId).roleApprovalChannelId ?? APPROVAL_CH;
+}
+
+function getConfiguredWelcomeChannelId(guildId: string): string | undefined {
+  return getGuildSettings(guildId).welcomeChannelId ?? WELCOME_CH;
+}
+
+function resolveChannelFromInput(guild: Guild, input?: string, fallbackChannel?: { id: string }) {
+  if (!input) {
+    if (fallbackChannel) return guild.channels.cache.get(fallbackChannel.id) ?? null;
+    return null;
+  }
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const id = trimmed.replace(/[<#>]/g, "");
+  const found = guild.channels.cache.get(id)
+    ?? guild.channels.cache.find((channel) => channel.name === trimmed.replace(/^#/, ""));
+  return found ?? null;
+}
 const AUTO_GRANT_INVITE_CODE = process.env["AUTO_GRANT_INVITE_CODE"] || "kngscreenshare";
 const AUTO_GRANT_ROLE_ID = process.env["AUTO_GRANT_ROLE_ID"] || "1527304379990937600";
 
@@ -270,6 +292,12 @@ async function recordMessageAndCheckSpam(message: Message) {
 
 function hasModeratorRole(member: GuildMember | null | undefined): boolean {
   if (!member) return false;
+  if (member.permissions?.has(PermissionsBitField.Flags.Administrator)) return true;
+  if (member.permissions?.has(PermissionsBitField.Flags.ManageGuild)) return true;
+
+  const configuredRoleIds = getGuildSettings(member.guild.id).botCommandRoleIds;
+  if (configuredRoleIds && configuredRoleIds.some((roleId) => member.roles.cache.has(roleId))) return true;
+
   if (member.permissions?.has(PermissionsBitField.Flags.ManageRoles)) return true;
   return member.roles.cache.some(
     (r) => r.name.toLowerCase() === MOD_ROLE_NAME.toLowerCase() || r.id === MOD_ROLE_ID,
@@ -502,9 +530,13 @@ client.on("guildMemberAdd", async (member) => {
     log.error("Failed to process invite-based auto-role:", e);
   }
 
-  const channel = member.guild.channels.cache.get(WELCOME_CH);
+  const configuredWelcomeChannel = getConfiguredWelcomeChannelId(member.guild.id);
+  const channel = member.guild.channels.cache.get(configuredWelcomeChannel)
+    ?? member.guild.channels.cache.find((ch) => ch.id === configuredWelcomeChannel && ch.isTextBased())
+    ?? resolveWelcomeChannel(configuredWelcomeChannel, Array.from(member.guild.channels.cache.values()), member.guild.systemChannel ?? null);
+
   if (!channel?.isTextBased()) {
-    log.warn(`Welcome channel ${WELCOME_CH} not available for guild ${member.guild.id}`);
+    log.warn(`Welcome channel ${configuredWelcomeChannel} not available for guild ${member.guild.id}`);
     return;
   }
 
@@ -999,8 +1031,9 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
     }
 
     const targetMember = interaction.member as GuildMember;
-    const approvalChannel = APPROVAL_CH
-      ? interaction.guild.channels.cache.get(APPROVAL_CH)
+    const approvalChannelId = getConfiguredApprovalChannelId(interaction.guild.id);
+    const approvalChannel = approvalChannelId
+      ? interaction.guild.channels.cache.get(approvalChannelId) ?? interaction.channel
       : interaction.channel;
 
     if (!approvalChannel || !("send" in approvalChannel)) {
@@ -1137,6 +1170,90 @@ client.on("messageCreate", async (message): Promise<void> => {
   const command = args.shift()?.toLowerCase();
   if (!command) return;
 
+  // !roleacceptchannel [#channel|channelId]
+  if (command === "roleacceptchannel") {
+    if (!hasModeratorRole(message.member)) { const r = await message.reply("Only moderators can use this."); cleanup(r); return; }
+
+    const targetChannel = resolveChannelFromInput(message.guild, args[0], message.channel) ?? message.channel;
+    if (!("send" in targetChannel)) {
+      const r = await message.reply("Could not find that text channel."); cleanup(r); return;
+    }
+
+    setGuildSetting(message.guild.id, "roleApprovalChannelId", targetChannel.id);
+    const r = await message.channel.send(`Role approval channel set to <#${targetChannel.id}>.`);
+    cleanup(r, 10000);
+    return;
+  }
+
+  // !welcome [#channel|channelId]
+  if (command === "welcome") {
+    if (!hasModeratorRole(message.member)) { const r = await message.reply("Only moderators can use this."); cleanup(r); return; }
+
+    const targetChannel = resolveChannelFromInput(message.guild, args[0], message.channel) ?? message.channel;
+    if (!("send" in targetChannel)) {
+      const r = await message.reply("Could not find that text channel."); cleanup(r); return;
+    }
+
+    setGuildSetting(message.guild.id, "welcomeChannelId", targetChannel.id);
+    const r = await message.channel.send(`Welcome channel set to <#${targetChannel.id}>.`);
+    cleanup(r, 10000);
+    return;
+  }
+
+  // !botperms [@role ...|off]
+  if (command === "botperms") {
+    if (!message.member) return;
+    const canManageServer = message.member.permissions?.has(PermissionsBitField.Flags.Administrator)
+      || message.member.permissions?.has(PermissionsBitField.Flags.ManageGuild);
+    if (!canManageServer) {
+      const r = await message.reply("Only server administrators can change bot command permissions.");
+      cleanup(r);
+      return;
+    }
+
+    const suppliedArgs = args.length ? args : [];
+    if (!suppliedArgs.length) {
+      const configuredRoleIds = getGuildSettings(message.guild.id).botCommandRoleIds ?? [];
+      if (!configuredRoleIds.length) {
+        const r = await message.channel.send("No custom bot command roles are configured. The default moderator role is still in use.");
+        cleanup(r, 10000);
+        return;
+      }
+
+      const roleNames = await Promise.all(configuredRoleIds.map(async (roleId) => {
+        const role = message.guild.roles.cache.get(roleId) ?? await message.guild.roles.fetch(roleId).catch(() => null);
+        return role ? role.toString() : `<@&${roleId}>`;
+      }));
+
+      const r = await message.channel.send(`Current bot command access: ${roleNames.join(", ")}`);
+      cleanup(r, 15000);
+      return;
+    }
+
+    if (suppliedArgs[0].toLowerCase() === "off") {
+      setGuildSetting(message.guild.id, "botCommandRoleIds", undefined);
+      const r = await message.channel.send("Bot command access reset to the default moderator role settings.");
+      cleanup(r, 10000);
+      return;
+    }
+
+    const roles = suppliedArgs
+      .map((arg) => resolveRole(message.guild, arg))
+      .filter((role): role is Role => Boolean(role));
+
+    if (!roles.length) {
+      const r = await message.reply("Could not find any valid roles in that input.");
+      cleanup(r);
+      return;
+    }
+
+    const uniqueRoleIds = [...new Set(roles.map((role) => role.id))];
+    setGuildSetting(message.guild.id, "botCommandRoleIds", uniqueRoleIds);
+    const r = await message.channel.send(`Bot command access set to ${roles.map((role) => role.toString()).join(", ")}.`);
+    cleanup(r, 15000);
+    return;
+  }
+
   // !setuprolebutton
   if (command === "setuprolebutton") {
     if (!hasModeratorRole(message.member)) { const r = await message.reply("Only moderators can use this."); cleanup(r); return; }
@@ -1234,7 +1351,7 @@ client.on("messageCreate", async (message): Promise<void> => {
   }
 
   // !bot - show bot profile and commands dropdown
-  if (command === "bot" || command === "help") {
+  if (command === "bot") {
     const embed = createBotProfileEmbed(client as any);
     const menu = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
       new StringSelectMenuBuilder()
@@ -1249,6 +1366,12 @@ client.on("messageCreate", async (message): Promise<void> => {
     );
 
     await message.channel.send({ embeds: [embed], components: [menu] });
+    return;
+  }
+
+  if (command === "help") {
+    const embed = createHelpEmbed();
+    await message.channel.send({ embeds: [embed] });
     return;
   }
 
