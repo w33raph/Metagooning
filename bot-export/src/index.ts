@@ -47,7 +47,11 @@ function getConfiguredWelcomeChannelId(guildId: string): string | undefined {
   return getGuildSettings(guildId).welcomeChannelId ?? WELCOME_CH;
 }
 
-function resolveChannelFromInput(guild: Guild, input?: string, fallbackChannel?: { id: string }) {
+function resolveChannelFromInput(
+  guild: Guild,
+  input?: string,
+  fallbackChannel?: { id: string },
+) {
   if (!input) {
     if (fallbackChannel) return guild.channels.cache.get(fallbackChannel.id) ?? null;
     return null;
@@ -56,7 +60,7 @@ function resolveChannelFromInput(guild: Guild, input?: string, fallbackChannel?:
   if (!trimmed) return null;
   const id = trimmed.replace(/[<#>]/g, "");
   const found = guild.channels.cache.get(id)
-    ?? guild.channels.cache.find((channel) => channel.name === trimmed.replace(/^#/, ""));
+    ?? guild.channels.cache.find((channel: { name: string }) => channel.name === trimmed.replace(/^#/, ""));
   return found ?? null;
 }
 const AUTO_GRANT_INVITE_CODE = process.env["AUTO_GRANT_INVITE_CODE"] || "kngscreenshare";
@@ -301,14 +305,14 @@ function hasModeratorRole(member: GuildMember | null | undefined): boolean {
 
   if (member.permissions?.has(PermissionsBitField.Flags.ManageRoles)) return true;
   return member.roles.cache.some(
-    (r) => r.name.toLowerCase() === MOD_ROLE_NAME.toLowerCase() || r.id === MOD_ROLE_ID,
+    (r: Role) => r.name.toLowerCase() === MOD_ROLE_NAME.toLowerCase() || r.id === MOD_ROLE_ID,
   );
 }
 
 function hasBanSubmissionRole(member: GuildMember | null | undefined): boolean {
   if (!member) return false;
   if (hasModeratorRole(member)) return true;
-  return member.roles.cache.some((r) => r.id === BAN_SUBMIT_ROLE_ID);
+  return member.roles.cache.some((r: Role) => r.id === BAN_SUBMIT_ROLE_ID);
 }
 
 async function buildLeaderboardEmbed(guildId: string) {
@@ -362,7 +366,7 @@ function resolveRole(guild: Guild, input: string) {
   const mention = input.match(/^<@&?(\d+)>$/);
   if (mention) return guild.roles.cache.get(mention[1]!) ?? null;
   if (/^\d{17,20}$/.test(input)) return guild.roles.cache.get(input) ?? null;
-  return guild.roles.cache.find((r) => r.name.toLowerCase() === input.toLowerCase()) ?? null;
+  return guild.roles.cache.find((r: Role) => r.name.toLowerCase() === input.toLowerCase()) ?? null;
 }
 
 async function resolveMember(guild: Guild, input: string) {
@@ -469,13 +473,13 @@ const client = new Client({
 
 client.once("ready", () => log.info(`Discord bot ready: ${client.user?.tag}`));
 
-client.on("error",          (e)      => log.error("Client error:", e));
-client.on("shardError",     (e)      => log.error("Shard error:", e));
-client.on("shardDisconnect",(ev, id) => log.warn(`Shard ${id} disconnected (${ev.code}) — will reconnect`));
-client.on("shardReconnecting",(id)   => log.info(`Shard ${id} reconnecting...`));
-client.on("shardResume",    (id)     => log.info(`Shard ${id} resumed`));
+client.on("error",          (e: Error)      => log.error("Client error:", e));
+client.on("shardError",     (e: Error)      => log.error("Shard error:", e));
+client.on("shardDisconnect",(ev: { code?: number }, id: number) => log.warn(`Shard ${id} disconnected (${ev.code}) — will reconnect`));
+client.on("shardReconnecting", (id: number) => log.info(`Shard ${id} reconnecting...`));
+client.on("shardResume", (id: number) => log.info(`Shard ${id} resumed`));
 
-process.on("unhandledRejection", (r) => log.error("Unhandled rejection:", r));
+process.on("unhandledRejection", (r: unknown) => log.error("Unhandled rejection:", r));
 
 // Periodic leaderboard updater: edit stored leaderboard messages every 5 minutes
 async function updateAllLeaderboards() {
@@ -504,12 +508,12 @@ client.once("ready", async () => {
   setInterval(() => updateAllLeaderboards().catch(() => {}), 5 * 60 * 1000);
 });
 
-client.on("guildCreate", async (guild) => {
+client.on("guildCreate", async (guild: Guild) => {
   await refreshGuildInvites(guild).catch(() => {});
 });
 
 // ── Welcome ──────────────────────────────────────────────────────────────────
-client.on("guildMemberAdd", async (member) => {
+client.on("guildMemberAdd", async (member: GuildMember) => {
   try {
     const configuredCode = AUTO_GRANT_INVITE_CODE.toLowerCase();
     const vanityCode = await getGuildVanityCode(member.guild);
@@ -532,16 +536,18 @@ client.on("guildMemberAdd", async (member) => {
   }
 
   const configuredWelcomeChannel = getConfiguredWelcomeChannelId(member.guild.id);
-  const channel = configuredWelcomeChannel
+  const candidateChannel = configuredWelcomeChannel
     ? member.guild.channels.cache.get(configuredWelcomeChannel)
-      ?? member.guild.channels.cache.find((ch) => ch.id === configuredWelcomeChannel && ch.isTextBased())
+      ?? member.guild.channels.cache.find((ch: { id: string; isTextBased: () => boolean }) => ch.id === configuredWelcomeChannel && ch.isTextBased())
       ?? resolveWelcomeChannel(configuredWelcomeChannel, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null)
     : resolveWelcomeChannel(undefined, Array.from(member.guild.channels.cache.values()) as WelcomeChannelLike[], member.guild.systemChannel ?? null);
 
-  if (!channel || !channel.isTextBased()) {
+  if (!candidateChannel || !("send" in candidateChannel) || !candidateChannel.isTextBased()) {
     log.warn(`Welcome channel ${configuredWelcomeChannel ?? "default"} not available for guild ${member.guild.id}`);
     return;
   }
+
+  const channel = candidateChannel as WelcomeChannelLike & { send: (payload: unknown) => Promise<unknown> };
 
   const n = member.guild.memberCount;
   const embed = new EmbedBuilder()
@@ -558,7 +564,7 @@ client.on("guildMemberAdd", async (member) => {
 });
 
 // ── Interactions ─────────────────────────────────────────────────────────────
-client.on("interactionCreate", async (interaction): Promise<void> => {
+client.on("interactionCreate", async (interaction: any): Promise<void> => {
   if (!interaction.guild) return;
 
   if (interaction.isButton()) {
@@ -770,13 +776,13 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
         const embed = msg?.embeds?.[0];
         if (embed) {
           const fields = embed.fields ?? [];
-          const userField = fields.find((f) => f.name === "User");
-          const rolesField = fields.find((f) => f.name === "Requested roles");
-          const nickField = fields.find((f) => f.name === "Display name");
-          const akaField = fields.find((f) => f.name === "AKA");
+          const userField = fields.find((f: { name: string }) => f.name === "User");
+          const rolesField = fields.find((f: { name: string }) => f.name === "Requested roles");
+          const nickField = fields.find((f: { name: string }) => f.name === "Display name");
+          const akaField = fields.find((f: { name: string }) => f.name === "AKA");
           const userIdMatch = userField?.value?.match(/^<@!?(\d+)>$/);
           const userId = userIdMatch ? userIdMatch[1] : userField?.value?.replace(/[^0-9]/g, "") ?? null;
-          const roleNames = rolesField ? rolesField.value.split(/,\s*/).map((s) => s.trim()).filter(Boolean) : [];
+          const roleNames = rolesField ? rolesField.value.split(/,\s*/).map((s: string) => s.trim()).filter(Boolean) : [];
           const nickname = nickField?.value ?? "";
           const inGameId = akaField?.value && akaField.value !== "—" ? akaField.value : "";
           if (userId) {
@@ -797,7 +803,7 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
       // Resolve roles by name when we don't have IDs
       const requestedRoles = request.roleIds.length
         ? request.roleIds.map((id) => resolveRole(interaction.guild!, id)).filter((r): r is Role => !!r)
-        : request.roleNames.map((name) => interaction.guild!.roles.cache.find((r) => r.name === name)).filter((r): r is Role => !!r);
+        : request.roleNames.map((name: string) => interaction.guild!.roles.cache.find((r: Role) => r.name === name)).filter((r): r is Role => !!r);
 
       if (!targetMember || !requestedRoles.length) {
         pendingRequests.delete(requestId);
@@ -873,7 +879,7 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
 
     const channelId = channelInput.replace(/[<#>]/g, "");
     const targetChannel = interaction.guild?.channels.cache.get(channelId)
-      ?? interaction.guild?.channels.cache.find((ch) => ch.name === channelInput.replace(/^#/, ""));
+      ?? interaction.guild?.channels.cache.find((ch: { name: string }) => ch.name === channelInput.replace(/^#/, ""));
     if (!targetChannel || !("send" in targetChannel)) {
       await interaction.reply({ content: "Could not find that text channel.", ephemeral: true });
       return;
@@ -909,7 +915,7 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
 
     await interaction.deferReply({ ephemeral: true });
     await interaction.guild.members.fetch();
-    const members = interaction.guild.members.cache.filter((m) => m.roles.cache.has(role.id) && !m.user.bot);
+    const members = interaction.guild.members.cache.filter((m: GuildMember) => m.roles.cache.has(role.id) && !m.user.bot);
     const embed = new EmbedBuilder()
       .setColor("#2563eb")
       .setTitle(titleInput || "ScreenShare")
@@ -1096,7 +1102,7 @@ client.on("guildAuditLogEntryCreate", async (auditLogEntry, guild) => {
       AuditLogEvent.EmojiDelete,
       AuditLogEvent.StickerDelete,
       AuditLogEvent.MemberKick,
-      AuditLogEvent.Ban,
+      AuditLogEvent.MemberBanAdd,
       AuditLogEvent.GuildUpdate,
     ]);
 
