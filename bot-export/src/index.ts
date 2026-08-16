@@ -62,6 +62,7 @@ const pendingRequests = new Map<
 >();
 const PENDING_PATH = path.join(process.cwd(), "data", "pendingRequests.json");
 const TIMEOUT_LOG_PATH = path.join(process.cwd(), "data", "timeoutLogChannels.json");
+const BAN_ACTION_LOG_PATH = path.join(process.cwd(), "data", "banActionLogChannels.json");
 const AUDIT_LOG_PATH = path.join(process.cwd(), "data", "audit.log");
 
 function loadPendingRequestsFromDisk() {
@@ -93,6 +94,29 @@ function saveTimeoutLogChannels(obj: Record<string, string>) {
 }
 
 const timeoutLogChannels = loadTimeoutLogChannels();
+
+function loadBanActionLogChannels(): Record<string, string> {
+  try {
+    if (!fs.existsSync(BAN_ACTION_LOG_PATH)) return {};
+    const raw = fs.readFileSync(BAN_ACTION_LOG_PATH, "utf8");
+    return JSON.parse(raw || "{}");
+  } catch (e) {
+    console.error("Failed to load ban action log channels:", e);
+    return {};
+  }
+}
+
+function saveBanActionLogChannels(obj: Record<string, string>) {
+  try {
+    const dir = path.dirname(BAN_ACTION_LOG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(BAN_ACTION_LOG_PATH, JSON.stringify(obj, null, 2), "utf8");
+  } catch (e) {
+    console.error("Failed to save ban action log channels:", e);
+  }
+}
+
+const banActionLogChannels = loadBanActionLogChannels();
 
 function appendAuditLog(line: string) {
   try {
@@ -1285,6 +1309,205 @@ client.on("messageCreate", async (message): Promise<void> => {
   }
 
   // !checkuser command removed — use OAuth2 opt-in or server-reporting network for cross-server membership data.
+
+  // !banslog <#channel|channelId|off> - configure where manual ban/unban actions are logged
+  if (command === "banslog") {
+    if (!hasModeratorRole(message.member)) {
+      const r = await message.reply("Only moderators can use this.");
+      cleanup(r);
+      return;
+    }
+
+    const arg = args[0];
+    if (!arg) {
+      const current = banActionLogChannels[message.guild.id];
+      const r = await message.channel.send(
+        current
+          ? `Ban action log channel: <#${current}>`
+          : "No ban action log channel configured. Use `!banslog #channel`."
+      );
+      cleanup(r, 10000);
+      return;
+    }
+
+    if (arg.toLowerCase() === "off") {
+      delete banActionLogChannels[message.guild.id];
+      saveBanActionLogChannels(banActionLogChannels);
+      const r = await message.channel.send("Ban/unban action logging disabled for this server.");
+      cleanup(r, 5000);
+      return;
+    }
+
+    const channelId = arg.replace(/[<#>]/g, "");
+    const targetCh =
+      message.guild.channels.cache.get(channelId) ??
+      await client.channels.fetch(channelId).catch(() => null);
+
+    if (!targetCh || !("send" in targetCh) || (targetCh as any).guildId !== message.guild.id) {
+      const r = await message.channel.send("Could not find that text channel in this server.");
+      cleanup(r);
+      return;
+    }
+
+    banActionLogChannels[message.guild.id] = (targetCh as any).id;
+    saveBanActionLogChannels(banActionLogChannels);
+
+    const r = await message.channel.send(
+      `Ban/unban action log channel set to <#${(targetCh as any).id}>`
+    );
+    cleanup(r, 10000);
+    return;
+  }
+
+  // !ban <UserID> (Reason)
+  if (command === "ban") {
+    if (!hasModeratorRole(message.member)) {
+      const r = await message.reply("Only moderators can use this.");
+      cleanup(r);
+      return;
+    }
+
+    const userId = args.shift()?.replace(/[<@!>]/g, "");
+    const reason = args.join(" ").trim().replace(/^\((.*)\)$/, "$1").trim();
+
+    if (!userId || !/^\d{17,20}$/.test(userId)) {
+      const r = await message.reply(`Usage: ${PREFIX}ban UserID (Reason)`);
+      cleanup(r);
+      return;
+    }
+
+    if (!reason) {
+      const r = await message.reply(`Usage: ${PREFIX}ban UserID (Reason)`);
+      cleanup(r);
+      return;
+    }
+
+    const botMember = message.guild.members.me;
+    if (!botMember?.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+      const r = await message.reply("I need the **Ban Members** permission to use this command.");
+      cleanup(r);
+      return;
+    }
+
+    try {
+      await message.guild.bans.create(userId, {
+        reason: `${reason} | Banned by ${message.author.tag} (${message.author.id})`,
+        deleteMessageSeconds: 0,
+      });
+
+      await message.delete().catch(() => {});
+
+      const embed = new EmbedBuilder()
+        .setColor("#ef4444")
+        .setTitle("🔨 User Banned")
+        .setThumbnail(`https://cdn.discordapp.com/avatars/${userId}/`)
+        .addFields(
+          { name: "User", value: `<@${userId}>`, inline: true },
+          { name: "User ID", value: userId, inline: true },
+          { name: "Banned By", value: `${message.author} (${message.author.id})`, inline: true },
+          { name: "Reason", value: reason, inline: false },
+        )
+        .setFooter({ text: `${message.guild.name} • Ban Logs` })
+        .setTimestamp();
+
+      const configuredChannelId = banActionLogChannels[message.guild.id];
+      if (configuredChannelId) {
+        const logChannel =
+          message.guild.channels.cache.get(configuredChannelId) ??
+          await client.channels.fetch(configuredChannelId).catch(() => null);
+
+        if (logChannel && "send" in logChannel) {
+          await (logChannel as any).send({ embeds: [embed] }).catch((e: unknown) =>
+            log.error("Failed to send ban action log:", e)
+          );
+        }
+      }
+
+      appendAuditLog(
+        `MANUAL_BAN guild=${message.guild.id} user=${userId} moderator=${message.author.id} reason=${JSON.stringify(reason)}`
+      );
+
+      const r = await message.channel.send(`🔨 <@${userId}> has been banned.`);
+      cleanup(r, 5000);
+    } catch (e) {
+      log.error("ban command:", e);
+      const r = await message.channel.send(
+        "Could not ban that user. Check that the ID is valid and that my role is high enough to ban them."
+      );
+      cleanup(r, 7000);
+    }
+    return;
+  }
+
+  // !unban <UserID>
+  if (command === "unban") {
+    if (!hasModeratorRole(message.member)) {
+      const r = await message.reply("Only moderators can use this.");
+      cleanup(r);
+      return;
+    }
+
+    const userId = args[0]?.replace(/[<@!>]/g, "");
+
+    if (!userId || !/^\d{17,20}$/.test(userId)) {
+      const r = await message.reply(`Usage: ${PREFIX}unban UserID`);
+      cleanup(r);
+      return;
+    }
+
+    const botMember = message.guild.members.me;
+    if (!botMember?.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+      const r = await message.reply("I need the **Ban Members** permission to use this command.");
+      cleanup(r);
+      return;
+    }
+
+    try {
+      await message.guild.bans.remove(
+        userId,
+        `Unbanned by ${message.author.tag} (${message.author.id})`
+      );
+
+      await message.delete().catch(() => {});
+
+      const embed = new EmbedBuilder()
+        .setColor("#22c55e")
+        .setTitle("🔓 User Unbanned")
+        .addFields(
+          { name: "User ID", value: userId, inline: true },
+          { name: "Unbanned By", value: `${message.author} (${message.author.id})`, inline: true },
+        )
+        .setFooter({ text: `${message.guild.name} • Ban Logs` })
+        .setTimestamp();
+
+      const configuredChannelId = banActionLogChannels[message.guild.id];
+      if (configuredChannelId) {
+        const logChannel =
+          message.guild.channels.cache.get(configuredChannelId) ??
+          await client.channels.fetch(configuredChannelId).catch(() => null);
+
+        if (logChannel && "send" in logChannel) {
+          await (logChannel as any).send({ embeds: [embed] }).catch((e: unknown) =>
+            log.error("Failed to send unban action log:", e)
+          );
+        }
+      }
+
+      appendAuditLog(
+        `MANUAL_UNBAN guild=${message.guild.id} user=${userId} moderator=${message.author.id}`
+      );
+
+      const r = await message.channel.send(`🔓 User **${userId}** has been unbanned.`);
+      cleanup(r, 5000);
+    } catch (e) {
+      log.error("unban command:", e);
+      const r = await message.channel.send(
+        "Could not unban that user. Make sure the user is currently banned and the ID is correct."
+      );
+      cleanup(r, 7000);
+    }
+    return;
+  }
 
   // !timeoutlog <#channel|channelId|off> - configure where timeout events are logged
   if (command === "timeoutlog") {
