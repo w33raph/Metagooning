@@ -48,6 +48,7 @@ const REQUESTABLE_ROLE_IDS = [
   "1537779341121953800", // Generic
   "1537779341570740264", // AntiBypass
   "1537779341121953801", // DMA
+  "1537779341121953798", // Leaks
 ];
 
 const BAN_SUBMIT_ROLE_ID = "1522793232755331192";
@@ -841,8 +842,8 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
           await interaction.reply({ content: "Could not update the member's roles.", ephemeral: true }); return;
         }
         const nick = request.inGameId
-          ? `OG |🚀 ${request.nickname} | ${request.inGameId}`
-          : `OG |🚀 ${request.nickname}`;
+          ? `${request.nickname} | ${request.inGameId}`
+          : request.nickname;
         await targetMember.setNickname(nick).catch(() => {});
         await targetMember.send(`Your role request for ${request.roleNames.join(", ")} was approved. Nickname: ${nick}`).catch(() => {});
         pendingRequests.delete(requestId);
