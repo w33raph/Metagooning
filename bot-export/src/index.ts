@@ -19,7 +19,6 @@ import {
   type Role,
 } from "discord.js";
 import banStore from "./banStore";
-import { resolveWelcomeChannel } from "./welcome";
 import { buildRoleSelectionOptions, formatRequestedRoles } from "./roleRequestUi";
 import { createBotProfileEmbed, createStandardEmbed } from "./utils/embed";
 
@@ -30,10 +29,7 @@ const log = {
 };
 
 const PREFIX       = process.env["COMMAND_PREFIX"]        || "!";
-const MOD_ROLE_NAME = process.env["MODERATOR_ROLE_NAME"]  || "moderator";
-const MOD_ROLE_ID   = process.env["MODERATOR_ROLE_ID"]    || "1537779341570740271";
 const APPROVAL_CH   = process.env["ROLE_APPROVAL_CHANNEL_ID"] || "1537779343927803946";
-const WELCOME_CH    = process.env["WELCOME_CHANNEL_ID"]   || "1537779342296490038";
 const TOKEN         = process.env["DISCORD_TOKEN"];
 const AUTO_GRANT_INVITE_CODE = process.env["AUTO_GRANT_INVITE_CODE"] || "kngscreenshare";
 const AUTO_GRANT_ROLE_ID = process.env["AUTO_GRANT_ROLE_ID"] || "1527304379990937600";
@@ -48,7 +44,6 @@ const REQUESTABLE_ROLE_IDS = [
   "1537779341121953800", // Generic
   "1537779341570740264", // AntiBypass
   "1537779341121953801", // DMA
-  "1537779341121953798", // Leaks
 ];
 
 const BAN_SUBMIT_ROLE_ID = "1522793232755331192";
@@ -63,8 +58,44 @@ const pendingRequests = new Map<
 >();
 const PENDING_PATH = path.join(process.cwd(), "data", "pendingRequests.json");
 const TIMEOUT_LOG_PATH = path.join(process.cwd(), "data", "timeoutLogChannels.json");
-const BAN_ACTION_LOG_PATH = path.join(process.cwd(), "data", "banActionLogChannels.json");
+const GUILD_CONFIG_PATH = path.join(process.cwd(), "data", "guildConfig.json");
 const AUDIT_LOG_PATH = path.join(process.cwd(), "data", "audit.log");
+
+type GuildConfig = {
+  botPermissionRoleId?: string;
+  welcomeChannelId?: string;
+};
+
+function loadGuildConfigs(): Record<string, GuildConfig> {
+  try {
+    if (!fs.existsSync(GUILD_CONFIG_PATH)) return {};
+    return JSON.parse(fs.readFileSync(GUILD_CONFIG_PATH, "utf8") || "{}");
+  } catch (e) {
+    log.error("Failed to load guild configs:", e);
+    return {};
+  }
+}
+
+function saveGuildConfigs(configs: Record<string, GuildConfig>) {
+  try {
+    const dir = path.dirname(GUILD_CONFIG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(GUILD_CONFIG_PATH, JSON.stringify(configs, null, 2), "utf8");
+  } catch (e) {
+    log.error("Failed to save guild configs:", e);
+  }
+}
+
+const guildConfigs = loadGuildConfigs();
+
+function getGuildConfig(guildId: string): GuildConfig {
+  return guildConfigs[guildId] ?? {};
+}
+
+function updateGuildConfig(guildId: string, update: Partial<GuildConfig>) {
+  guildConfigs[guildId] = { ...getGuildConfig(guildId), ...update };
+  saveGuildConfigs(guildConfigs);
+}
 
 function loadPendingRequestsFromDisk() {
   try {
@@ -95,29 +126,6 @@ function saveTimeoutLogChannels(obj: Record<string, string>) {
 }
 
 const timeoutLogChannels = loadTimeoutLogChannels();
-
-function loadBanActionLogChannels(): Record<string, string> {
-  try {
-    if (!fs.existsSync(BAN_ACTION_LOG_PATH)) return {};
-    const raw = fs.readFileSync(BAN_ACTION_LOG_PATH, "utf8");
-    return JSON.parse(raw || "{}");
-  } catch (e) {
-    console.error("Failed to load ban action log channels:", e);
-    return {};
-  }
-}
-
-function saveBanActionLogChannels(obj: Record<string, string>) {
-  try {
-    const dir = path.dirname(BAN_ACTION_LOG_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(BAN_ACTION_LOG_PATH, JSON.stringify(obj, null, 2), "utf8");
-  } catch (e) {
-    console.error("Failed to save ban action log channels:", e);
-  }
-}
-
-const banActionLogChannels = loadBanActionLogChannels();
 
 function appendAuditLog(line: string) {
   try {
@@ -279,10 +287,15 @@ async function recordMessageAndCheckSpam(message: Message) {
 
 function hasModeratorRole(member: GuildMember | null | undefined): boolean {
   if (!member) return false;
-  if (member.permissions?.has(PermissionsBitField.Flags.ManageRoles)) return true;
-  return member.roles.cache.some(
-    (r) => r.name.toLowerCase() === MOD_ROLE_NAME.toLowerCase() || r.id === MOD_ROLE_ID,
-  );
+  // Server Administrators always have bot-management permissions.
+  if (member.permissions?.has(PermissionsBitField.Flags.Administrator)) return true;
+
+  const configuredRoleId = getGuildConfig(member.guild.id).botPermissionRoleId;
+  return Boolean(configuredRoleId && member.roles.cache.has(configuredRoleId));
+}
+
+function hasAdministrator(member: GuildMember | null | undefined): boolean {
+  return Boolean(member?.permissions?.has(PermissionsBitField.Flags.Administrator));
 }
 
 function hasBanSubmissionRole(member: GuildMember | null | undefined): boolean {
@@ -551,9 +564,16 @@ client.on("guildMemberAdd", async (member) => {
     log.error("Failed to process invite-based auto-role:", e);
   }
 
-  const channel = member.guild.channels.cache.get(WELCOME_CH);
+  const welcomeChannelId = getGuildConfig(member.guild.id).welcomeChannelId;
+  if (!welcomeChannelId) {
+    log.info(`Welcome channel is not configured for guild ${member.guild.id}`);
+    return;
+  }
+
+  const channel = member.guild.channels.cache.get(welcomeChannelId)
+    ?? await client.channels.fetch(welcomeChannelId).catch(() => null);
   if (!channel?.isTextBased()) {
-    log.warn(`Welcome channel ${WELCOME_CH} not available for guild ${member.guild.id}`);
+    log.warn(`Configured welcome channel ${welcomeChannelId} is not available for guild ${member.guild.id}`);
     return;
   }
 
@@ -842,8 +862,8 @@ client.on("interactionCreate", async (interaction): Promise<void> => {
           await interaction.reply({ content: "Could not update the member's roles.", ephemeral: true }); return;
         }
         const nick = request.inGameId
-          ? `${request.nickname} | ${request.inGameId}`
-          : request.nickname;
+          ? `OG |🚀 ${request.nickname} | ${request.inGameId}`
+          : `OG |🚀 ${request.nickname}`;
         await targetMember.setNickname(nick).catch(() => {});
         await targetMember.send(`Your role request for ${request.roleNames.join(", ")} was approved. Nickname: ${nick}`).catch(() => {});
         pendingRequests.delete(requestId);
@@ -1117,6 +1137,93 @@ client.on("messageCreate", async (message): Promise<void> => {
   const command = args.shift()?.toLowerCase();
   if (!command) return;
 
+  // !botpermission @role - Administrator-only command to configure the role
+  // that can use the bot's moderator/management commands in this server.
+  if (command === "botpermission") {
+    if (!hasAdministrator(message.member)) {
+      const r = await message.reply("Only users with the **Administrator** permission can configure bot permissions.");
+      cleanup(r);
+      return;
+    }
+
+    const roleArg = args[0];
+    if (!roleArg) {
+      const current = getGuildConfig(message.guild.id).botPermissionRoleId;
+      const r = await message.reply(
+        current
+          ? `Bot permission role: <@&${current}>\nUsage: ${PREFIX}botpermission @role`
+          : `No bot permission role is configured.\nUsage: ${PREFIX}botpermission @role`,
+      );
+      cleanup(r, 10000);
+      return;
+    }
+
+    const role = resolveRole(message.guild, roleArg);
+    if (!role) {
+      const r = await message.reply("I could not find that role. Please mention the role, for example `!botpermission @Moderators`.");
+      cleanup(r);
+      return;
+    }
+    if (role.id === message.guild.id) {
+      const r = await message.reply("You cannot use @everyone as the bot permission role.");
+      cleanup(r);
+      return;
+    }
+
+    updateGuildConfig(message.guild.id, { botPermissionRoleId: role.id });
+    appendAuditLog(`BOT_PERMISSION_SET guild=${message.guild.id} role=${role.id} by=${message.author.id}`);
+    const r = await message.channel.send(`✅ Bot permission role set to <@&${role.id}>. Members with that role can now use the bot's moderator commands.`);
+    cleanup(r, 10000);
+    return;
+  }
+
+  // !welcome #channel - Administrator-only command to configure the welcome channel.
+  // !welcome off disables welcome messages for this server.
+  if (command === "welcome") {
+    if (!hasAdministrator(message.member)) {
+      const r = await message.reply("Only users with the **Administrator** permission can configure the welcome channel.");
+      cleanup(r);
+      return;
+    }
+
+    const channelArg = args[0];
+    const current = getGuildConfig(message.guild.id).welcomeChannelId;
+
+    if (!channelArg) {
+      const r = await message.reply(
+        current
+          ? `Welcome channel: <#${current}>\nUsage: ${PREFIX}welcome #channel\nDisable with: ${PREFIX}welcome off`
+          : `No welcome channel is configured.\nUsage: ${PREFIX}welcome #channel`,
+      );
+      cleanup(r, 10000);
+      return;
+    }
+
+    if (channelArg.toLowerCase() === "off") {
+      updateGuildConfig(message.guild.id, { welcomeChannelId: undefined });
+      appendAuditLog(`WELCOME_CHANNEL_DISABLED guild=${message.guild.id} by=${message.author.id}`);
+      const r = await message.channel.send("✅ Welcome messages have been disabled for this server.");
+      cleanup(r, 10000);
+      return;
+    }
+
+    const channelId = channelArg.replace(/[<#>]/g, "");
+    const targetChannel = message.guild.channels.cache.get(channelId)
+      ?? await client.channels.fetch(channelId).catch(() => null);
+
+    if (!targetChannel || !targetChannel.isTextBased() || targetChannel.guildId !== message.guild.id) {
+      const r = await message.reply("I could not find that text channel in this server. Use a channel mention such as `#welcome`.");
+      cleanup(r);
+      return;
+    }
+
+    updateGuildConfig(message.guild.id, { welcomeChannelId: targetChannel.id });
+    appendAuditLog(`WELCOME_CHANNEL_SET guild=${message.guild.id} channel=${targetChannel.id} by=${message.author.id}`);
+    const r = await message.channel.send(`✅ Welcome channel set to <#${targetChannel.id}>.`);
+    cleanup(r, 10000);
+    return;
+  }
+
   // !clear all / !clear <number>
   if (command === "clear") {
     if (!hasModeratorRole(message.member)) {
@@ -1270,6 +1377,8 @@ client.on("messageCreate", async (message): Promise<void> => {
           { label: "Role Request", value: "role-request", description: "How to request roles" },
           { label: "Scan Register", value: "scan-register", description: "Log scan-register results" },
           { label: "Setup Buttons", value: "setup-buttons", description: "Install role/ban buttons" },
+          { label: "Bot Permissions", value: "bot-permission", description: `Configure with ${PREFIX}botpermission @role` },
+          { label: "Welcome Channel", value: "welcome", description: `Configure with ${PREFIX}welcome #channel` },
           { label: "Bot Profile", value: "profile", description: "Show bot info" },
         ]),
     );
@@ -1310,205 +1419,6 @@ client.on("messageCreate", async (message): Promise<void> => {
   }
 
   // !checkuser command removed — use OAuth2 opt-in or server-reporting network for cross-server membership data.
-
-  // !banslog <#channel|channelId|off> - configure where manual ban/unban actions are logged
-  if (command === "banslog") {
-    if (!hasModeratorRole(message.member)) {
-      const r = await message.reply("Only moderators can use this.");
-      cleanup(r);
-      return;
-    }
-
-    const arg = args[0];
-    if (!arg) {
-      const current = banActionLogChannels[message.guild.id];
-      const r = await message.channel.send(
-        current
-          ? `Ban action log channel: <#${current}>`
-          : "No ban action log channel configured. Use `!banslog #channel`."
-      );
-      cleanup(r, 10000);
-      return;
-    }
-
-    if (arg.toLowerCase() === "off") {
-      delete banActionLogChannels[message.guild.id];
-      saveBanActionLogChannels(banActionLogChannels);
-      const r = await message.channel.send("Ban/unban action logging disabled for this server.");
-      cleanup(r, 5000);
-      return;
-    }
-
-    const channelId = arg.replace(/[<#>]/g, "");
-    const targetCh =
-      message.guild.channels.cache.get(channelId) ??
-      await client.channels.fetch(channelId).catch(() => null);
-
-    if (!targetCh || !("send" in targetCh) || (targetCh as any).guildId !== message.guild.id) {
-      const r = await message.channel.send("Could not find that text channel in this server.");
-      cleanup(r);
-      return;
-    }
-
-    banActionLogChannels[message.guild.id] = (targetCh as any).id;
-    saveBanActionLogChannels(banActionLogChannels);
-
-    const r = await message.channel.send(
-      `Ban/unban action log channel set to <#${(targetCh as any).id}>`
-    );
-    cleanup(r, 10000);
-    return;
-  }
-
-  // !ban <UserID> (Reason)
-  if (command === "ban") {
-    if (!hasModeratorRole(message.member)) {
-      const r = await message.reply("Only moderators can use this.");
-      cleanup(r);
-      return;
-    }
-
-    const userId = args.shift()?.replace(/[<@!>]/g, "");
-    const reason = args.join(" ").trim().replace(/^\((.*)\)$/, "$1").trim();
-
-    if (!userId || !/^\d{17,20}$/.test(userId)) {
-      const r = await message.reply(`Usage: ${PREFIX}ban UserID (Reason)`);
-      cleanup(r);
-      return;
-    }
-
-    if (!reason) {
-      const r = await message.reply(`Usage: ${PREFIX}ban UserID (Reason)`);
-      cleanup(r);
-      return;
-    }
-
-    const botMember = message.guild.members.me;
-    if (!botMember?.permissions.has(PermissionsBitField.Flags.BanMembers)) {
-      const r = await message.reply("I need the **Ban Members** permission to use this command.");
-      cleanup(r);
-      return;
-    }
-
-    try {
-      await message.guild.bans.create(userId, {
-        reason: `${reason} | Banned by ${message.author.tag} (${message.author.id})`,
-        deleteMessageSeconds: 0,
-      });
-
-      await message.delete().catch(() => {});
-
-      const embed = new EmbedBuilder()
-        .setColor("#ef4444")
-        .setTitle("🔨 User Banned")
-        .setThumbnail(`https://cdn.discordapp.com/avatars/${userId}/`)
-        .addFields(
-          { name: "User", value: `<@${userId}>`, inline: true },
-          { name: "User ID", value: userId, inline: true },
-          { name: "Banned By", value: `${message.author} (${message.author.id})`, inline: true },
-          { name: "Reason", value: reason, inline: false },
-        )
-        .setFooter({ text: `${message.guild.name} • Ban Logs` })
-        .setTimestamp();
-
-      const configuredChannelId = banActionLogChannels[message.guild.id];
-      if (configuredChannelId) {
-        const logChannel =
-          message.guild.channels.cache.get(configuredChannelId) ??
-          await client.channels.fetch(configuredChannelId).catch(() => null);
-
-        if (logChannel && "send" in logChannel) {
-          await (logChannel as any).send({ embeds: [embed] }).catch((e: unknown) =>
-            log.error("Failed to send ban action log:", e)
-          );
-        }
-      }
-
-      appendAuditLog(
-        `MANUAL_BAN guild=${message.guild.id} user=${userId} moderator=${message.author.id} reason=${JSON.stringify(reason)}`
-      );
-
-      const r = await message.channel.send(`🔨 <@${userId}> has been banned.`);
-      cleanup(r, 5000);
-    } catch (e) {
-      log.error("ban command:", e);
-      const r = await message.channel.send(
-        "Could not ban that user. Check that the ID is valid and that my role is high enough to ban them."
-      );
-      cleanup(r, 7000);
-    }
-    return;
-  }
-
-  // !unban <UserID>
-  if (command === "unban") {
-    if (!hasModeratorRole(message.member)) {
-      const r = await message.reply("Only moderators can use this.");
-      cleanup(r);
-      return;
-    }
-
-    const userId = args[0]?.replace(/[<@!>]/g, "");
-
-    if (!userId || !/^\d{17,20}$/.test(userId)) {
-      const r = await message.reply(`Usage: ${PREFIX}unban UserID`);
-      cleanup(r);
-      return;
-    }
-
-    const botMember = message.guild.members.me;
-    if (!botMember?.permissions.has(PermissionsBitField.Flags.BanMembers)) {
-      const r = await message.reply("I need the **Ban Members** permission to use this command.");
-      cleanup(r);
-      return;
-    }
-
-    try {
-      await message.guild.bans.remove(
-        userId,
-        `Unbanned by ${message.author.tag} (${message.author.id})`
-      );
-
-      await message.delete().catch(() => {});
-
-      const embed = new EmbedBuilder()
-        .setColor("#22c55e")
-        .setTitle("🔓 User Unbanned")
-        .addFields(
-          { name: "User ID", value: userId, inline: true },
-          { name: "Unbanned By", value: `${message.author} (${message.author.id})`, inline: true },
-        )
-        .setFooter({ text: `${message.guild.name} • Ban Logs` })
-        .setTimestamp();
-
-      const configuredChannelId = banActionLogChannels[message.guild.id];
-      if (configuredChannelId) {
-        const logChannel =
-          message.guild.channels.cache.get(configuredChannelId) ??
-          await client.channels.fetch(configuredChannelId).catch(() => null);
-
-        if (logChannel && "send" in logChannel) {
-          await (logChannel as any).send({ embeds: [embed] }).catch((e: unknown) =>
-            log.error("Failed to send unban action log:", e)
-          );
-        }
-      }
-
-      appendAuditLog(
-        `MANUAL_UNBAN guild=${message.guild.id} user=${userId} moderator=${message.author.id}`
-      );
-
-      const r = await message.channel.send(`🔓 User **${userId}** has been unbanned.`);
-      cleanup(r, 5000);
-    } catch (e) {
-      log.error("unban command:", e);
-      const r = await message.channel.send(
-        "Could not unban that user. Make sure the user is currently banned and the ID is correct."
-      );
-      cleanup(r, 7000);
-    }
-    return;
-  }
 
   // !timeoutlog <#channel|channelId|off> - configure where timeout events are logged
   if (command === "timeoutlog") {
